@@ -1,4 +1,4 @@
-name: Build & Verify 636mecheri 100% Offline APK
+name: Build & Verify 636mecheri Play-Ready Offline Release
 
 on:
   push:
@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
 
 jobs:
-  build_and_audit_apk:
+  build_and_audit_release:
     runs-on: ubuntu-latest
 
     steps:
@@ -14,45 +14,101 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Set up JDK 17
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           java-version: '17'
           distribution: 'temurin'
 
-      - name: Setup Gradle 8.7
+      - name: Setup Gradle 8.11.1
         uses: gradle/actions/setup-gradle@v4
         with:
-          gradle-version: '8.7'
+          gradle-version: '8.11.1'
 
-      - name: Build Debug Offline APK
-        run: gradle assembleDebug --stacktrace
-
-      - name: Automated 0%-Network Security Audit Gate (aapt2)
+      - name: Prepare Release Signing Keystore (if Secrets Configured)
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
         run: |
-          APK_PATH="app/build/outputs/apk/debug/app-debug.apk"
-          AAPT2=$(find "$ANDROID_HOME/build-tools" -name aapt2 | sort -V | tail -n 1)
-          echo "Using aapt2: $AAPT2"
-          echo "=== DECLARED PERMISSIONS IN COMPILED APK ==="
-          PERMS=$($AAPT2 dump permissions "$APK_PATH")
-          echo "$PERMS"
-
-          FORBIDDEN="INTERNET|ACCESS_NETWORK_STATE|ACCESS_WIFI_STATE|CHANGE_WIFI_STATE|CHANGE_NETWORK_STATE|NEARBY_WIFI_DEVICES|BLUETOOTH|ACCESS_FINE_LOCATION|ACCESS_COARSE_LOCATION|READ_PHONE_STATE|NFC|AD_ID|usb\\.host|usb\\.accessory"
-          if echo "$PERMS" | grep -E "$FORBIDDEN"; then
-            echo "SECURITY GATE FAILED: Forbidden network/USB/tracking permission detected in compiled APK!"
-            exit 1
+          if [ -n "$KEYSTORE_BASE64" ]; then
+            echo "$KEYSTORE_BASE64" | tr -d '\n\r ' | base64 -d > "$RUNNER_TEMP/release-keystore.p12"
+            echo "KEYSTORE_FILE=$RUNNER_TEMP/release-keystore.p12" >> "$GITHUB_ENV"
+            echo "KEYSTORE_PASSWORD=$KEYSTORE_PASSWORD" >> "$GITHUB_ENV"
+            echo "KEY_ALIAS=$KEY_ALIAS" >> "$GITHUB_ENV"
+            echo "KEY_PASSWORD=$KEY_PASSWORD" >> "$GITHUB_ENV"
+            echo "IS_SIGNED=true" >> "$GITHUB_ENV"
+            echo "Release signing keystore decoded cleanly."
           else
-            echo "SECURITY GATE PASSED: 0% Network, 0% Wi-Fi, 0% USB, 0% Tracking verified!"
+            echo "IS_SIGNED=false" >> "$GITHUB_ENV"
+            echo "NOTE: Signing secrets not configured yet -> building unsigned release AAB/APK for verification."
           fi
 
-      - name: Copy & Print SHA-256 Checksum
-        run: |
-          cp app/build/outputs/apk/debug/app-debug.apk 636mecheri-v1-offline.apk
-          sha256sum 636mecheri-v1-offline.apk | tee 636mecheri-v1-offline.sha256
+      - name: Build API 36 Release AAB & Release APK
+        run: gradle bundleRelease assembleRelease --stacktrace
 
-      - name: Upload Verified 636mecheri APK Artifact
+      - name: Gate 1 - 0%-Network Security Audit (aapt2)
+        run: |
+          APK_PATH=$(find app/build/outputs/apk/release -name "*.apk" | head -n 1)
+          AAPT2=$(find "$ANDROID_HOME/build-tools" -name aapt2 | sort -V | tail -n 1)
+          echo "Auditing APK: $APK_PATH"
+          PERMS=$($AAPT2 dump permissions "$APK_PATH")
+          echo "$PERMS"
+          FORBIDDEN="INTERNET|ACCESS_NETWORK_STATE|ACCESS_WIFI_STATE|CHANGE_WIFI_STATE|CHANGE_NETWORK_STATE|NEARBY_WIFI_DEVICES|BLUETOOTH|ACCESS_FINE_LOCATION|ACCESS_COARSE_LOCATION|READ_PHONE_STATE|NFC|AD_ID|usb\.host|usb\.accessory"
+          if echo "$PERMS" | grep -E "$FORBIDDEN"; then
+            echo "SECURITY GATE FAILED: Forbidden network/USB/tracking permission detected!"
+            exit 1
+          fi
+          echo "GATE 1 PASSED: 0% Network, 0% Wi-Fi, 0% USB, 0% Tracking verified!"
+
+      - name: Gate 2 - 16 KB Memory Page Alignment Audit (ELF LOAD Segments)
+        run: |
+          mkdir -p /tmp/aab_check
+          unzip -q -o app/build/outputs/bundle/release/app-release.aab -d /tmp/aab_check
+          FAIL=0
+          COUNT=0
+          for SO in $(find /tmp/aab_check -path "*/lib/arm64-v8a/*.so" -o -path "*/lib/x86_64/*.so"); do
+            COUNT=$((COUNT + 1))
+            echo "Checking 16 KB alignment: $SO"
+            for ALN in $(readelf -lW "$SO" | awk '$1=="LOAD"{print $NF}'); do
+              VAL=$((ALN))
+              if [ "$VAL" -lt 16384 ]; then
+                echo "FAIL: $SO has LOAD alignment $ALN (< 16384)"
+                FAIL=1
+              else
+                echo "  OK LOAD Align=$ALN ($VAL bytes >= 16 KB)"
+              fi
+            done
+          done
+          echo "Checked $COUNT 64-bit native libraries."
+          if [ "$FAIL" -ne 0 ]; then
+            echo "GATE 2 FAILED: Non-16KB-aligned native library detected!"
+            exit 1
+          fi
+          echo "GATE 2 PASSED: 100% 16 KB Page Size Compliant!"
+
+      - name: Package Artifacts & Verify Signatures
+        run: |
+          APK_SRC=$(find app/build/outputs/apk/release -name "*.apk" | head -n 1)
+          AAB_SRC="app/build/outputs/bundle/release/app-release.aab"
+          if [ "$IS_SIGNED" = "true" ]; then
+            cp "$AAB_SRC" 636mecheri-v1.0.1-playstore-signed.aab
+            cp "$APK_SRC" 636mecheri-v1.0.1-release-signed.apk
+            jarsigner -verify -verbose -certs 636mecheri-v1.0.1-playstore-signed.aab > /dev/null
+            APKSIGNER=$(find "$ANDROID_HOME/build-tools" -name apksigner | sort -V | tail -n 1)
+            $APKSIGNER verify --verbose 636mecheri-v1.0.1-release-signed.apk | head -n 15
+            sha256sum 636mecheri-v1.0.1-playstore-signed.aab 636mecheri-v1.0.1-release-signed.apk | tee 636mecheri-v1.0.1-checksums.sha256
+          else
+            cp "$AAB_SRC" 636mecheri-v1.0.1-unsigned.aab
+            cp "$APK_SRC" 636mecheri-v1.0.1-unsigned.apk
+            sha256sum 636mecheri-v1.0.1-unsigned.aab 636mecheri-v1.0.1-unsigned.apk | tee 636mecheri-v1.0.1-checksums.sha256
+          fi
+
+      - name: Upload Play-Ready Release Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: 636mecheri-v1-offline-apk
+          name: 636mecheri-v1.0.1-api36-release
           path: |
-            636mecheri-v1-offline.apk
-            636mecheri-v1-offline.sha256
+            636mecheri-v1.0.1-*.aab
+            636mecheri-v1.0.1-*.apk
+            636mecheri-v1.0.1-checksums.sha256
