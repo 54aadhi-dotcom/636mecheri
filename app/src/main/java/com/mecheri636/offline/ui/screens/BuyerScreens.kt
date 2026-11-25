@@ -39,9 +39,7 @@ fun BuyerSavedShopsScreen(
         if (shops.isEmpty()) {
             Card(modifier = Modifier.fillMaxWidth()) {
                 Text(
-                    "Scan any local vegetable or fruit shop's QR code at their entrance (0–2 m) to load live prices offline at home!
-
-கடை முகப்பில் உள்ள QR குறியீட்டை ஸ்கேன் செய்தால், வீட்டிலிருந்தே ஆஃப்லைனில் விலை பார்த்து பட்டியல் போடலாம்.",
+                    "Scan any local vegetable or fruit shop's QR code at their entrance (0–2 m) to load live prices offline at home!\n\nகடை முகப்பில் உள்ள QR குறியீட்டை ஸ்கேன் செய்தால், வீட்டிலிருந்தே ஆஃப்லைனில் விலை பார்த்து பட்டியல் போடலாம்.",
                     modifier = Modifier.padding(16.dp)
                 )
             }
@@ -91,9 +89,7 @@ fun BuyerCartAndQrScreen(
             item {
                 Card(modifier = Modifier.fillMaxWidth()) {
                     Text(
-                        "Your cart is empty. Pick items from the 'Shop' tab at home, then show the Cart QR at the shop counter!
-
-பட்டியல் காலியாக உள்ளது. பொருட்களைத் தேர்ந்தெடுத்தவுடன் உங்கள் Cart QR இங்கே தோன்றும்.",
+                        "Your cart is empty. Pick items from the 'Shop' tab at home, then show the Cart QR at the shop counter!\n\nபட்டியல் காலியாக உள்ளது. பொருட்களைத் தேர்ந்தெடுத்தவுடன் உங்கள் Cart QR இங்கே தோன்றும்.",
                         modifier = Modifier.padding(16.dp)
                     )
                 }

@@ -20,8 +20,7 @@ fun TrustVerifierScreen(
     ) {
         item {
             Text(
-                "100% Offline Trust Verifier
-100% ஆஃப்லைன் பாதுகாப்புச் சரிபார்ப்பு",
+                "100% Offline Trust Verifier\n100% ஆஃப்லைன் பாதுகாப்புச் சரிபார்ப்பு",
                 style = MaterialTheme.typography.titleLarge,
                 fontWeight = FontWeight.Bold
             )
@@ -42,7 +41,7 @@ fun TrustVerifierScreen(
                             if (report.isManifestZeroNetwork) "PASS ✅ Zero Network, Wi-Fi, USB, Bluetooth or Location permissions declared!"
                             else "FAIL ❌ Found: ${report.forbiddenPermissionsFound}"
                         )
-                        Text("Declared Permissions (${report.declaredPermissions.size}): ${report.declaredPermissions.joinToString(", ")}", style = MaterialTheme.typography.bodySmall)
+                        Text("Declared Permissions (${report.declaredPermissions.size}):${report.declaredPermissions.joinToString(", ")}", style = MaterialTheme.typography.bodySmall)
                     }
                 }
             }

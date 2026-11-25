@@ -79,8 +79,7 @@ fun SellerEditItemDialog(
 
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("${item.nameEn}
-${item.nameTa}") },
+        title = { Text("${item.nameEn}\n${item.nameTa}") },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 OutlinedTextField(
@@ -162,9 +161,7 @@ fun SellerLiveBoardQrScreen(
         if (frames.isEmpty()) {
             Card(modifier = Modifier.fillMaxWidth()) {
                 Text(
-                    "Add at least 1 product with a ₹ price > 0 in your Shop Catalog to generate your Live Board QR.
-
-குறைந்தது 1 பொருளை விலையுடன் சேர்த்த பிறகு உங்கள் கடை QR உருவாகும்.",
+                    "Add at least 1 product with a ₹ price > 0 in your Shop Catalog to generate your Live Board QR.\n\nகுறைந்தது 1 பொருளை விலையுடன் சேர்த்த பிறகு உங்கள் கடை QR உருவாகும்.",
                     modifier = Modifier.padding(16.dp)
                 )
             }
@@ -210,8 +207,7 @@ fun SellerCounterPackingScreen(
         if (summary.isWrongShop) {
             Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer)) {
                 Text(
-                    "WARNING: This Buyer Cart QR belongs to a DIFFERENT shop!
-எச்சரிக்கை: இந்த QR வேறொரு கடைக்கானது!",
+                    "WARNING: This Buyer Cart QR belongs to a DIFFERENT shop!\nஎச்சரிக்கை: இந்த QR வேறொரு கடைக்கானது!",
                     modifier = Modifier.padding(16.dp),
                     fontWeight = FontWeight.Bold
                 )

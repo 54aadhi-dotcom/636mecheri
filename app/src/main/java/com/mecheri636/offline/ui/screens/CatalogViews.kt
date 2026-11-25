@@ -147,14 +147,9 @@ fun MultiViewCatalogBrowser(
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
                 Text(
                     text = if (role == UserRole.SELLER && filter.sellerShowAddedOnly) {
-                        "No items added yet (all 160 start hidden).
-Tap '+ Pick from 160' above to add items you sell!
-
-இன்னும் பொருட்கள் சேர்க்கப்படவில்லை.
-மேலே '+ Pick from 160' தட்டி உங்கள் பொருட்களைச் சேர்க்கவும்."
+                        "No items added yet (all 160 start hidden).\nTap '+ Pick from 160' above to add items you sell!\n\nஇன்னும் பொருட்கள் சேர்க்கப்படவில்லை.\nமேலே '+ Pick from 160' தட்டி உங்கள் பொருட்களைச் சேர்க்கவும்."
                     } else {
-                        "No matching items found.
-பொருந்தும் பொருட்கள் எதுவும் இல்லை."
+                        "No matching items found.\nபொருந்தும் பொருட்கள் எதுவும் இல்லை."
                     },
                     textAlign = TextAlign.Center
                 )
