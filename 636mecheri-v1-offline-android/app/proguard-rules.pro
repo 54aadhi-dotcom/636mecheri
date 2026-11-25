@@ -1,0 +1,2 @@
+-keep class com.mecheri636.offline.data.db.** { *; }
+-keep class com.mecheri636.offline.qr.** { *; }
