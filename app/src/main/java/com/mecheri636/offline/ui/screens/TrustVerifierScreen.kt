@@ -41,7 +41,7 @@ fun TrustVerifierScreen(
                             if (report.isManifestZeroNetwork) "PASS ✅ Zero Network, Wi-Fi, USB, Bluetooth or Location permissions declared!"
                             else "FAIL ❌ Found: ${report.forbiddenPermissionsFound}"
                         )
-                        Text("Declared Permissions (${report.declaredPermissions.size}):${report.declaredPermissions.joinToString(", ")}", style = MaterialTheme.typography.bodySmall)
+                        Text("Declared Permissions (${report.declaredPermissions.size}): ${report.declaredPermissions.joinToString(", ")}", style = MaterialTheme.typography.bodySmall)
                     }
                 }
             }
