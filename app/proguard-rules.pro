@@ -14,3 +14,11 @@
 -keep class androidx.camera.** { *; }
 -dontwarn javax.annotation.**
 -dontwarn com.google.errorprone.annotations.**
+
+# Fix Release R8 crash: CompositionLocal LocalLifecycleOwner not present (AndroidX b/336842920)
+-keepattributes *Annotation*
+-keep class androidx.compose.ui.platform.AndroidCompositionLocals_androidKt { *; }
+-keep class androidx.lifecycle.compose.LocalLifecycleOwnerKt { *; }
+-keep class androidx.lifecycle.** { *; }
+-keep class * extends androidx.lifecycle.ViewModel { public <init>(...); }
+-keep class * extends androidx.lifecycle.AndroidViewModel { public <init>(...); }

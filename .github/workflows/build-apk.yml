@@ -92,23 +92,23 @@ jobs:
           APK_SRC=$(find app/build/outputs/apk/release -name "*.apk" | head -n 1)
           AAB_SRC="app/build/outputs/bundle/release/app-release.aab"
           if [ "$IS_SIGNED" = "true" ]; then
-            cp "$AAB_SRC" 636mecheri-v1.0.1-playstore-signed.aab
-            cp "$APK_SRC" 636mecheri-v1.0.1-release-signed.apk
-            jarsigner -verify -verbose -certs 636mecheri-v1.0.1-playstore-signed.aab > /dev/null
+            cp "$AAB_SRC" 636mecheri-v1.0.2-playstore-signed.aab
+            cp "$APK_SRC" 636mecheri-v1.0.2-release-signed.apk
+            jarsigner -verify -verbose -certs 636mecheri-v1.0.2-playstore-signed.aab > /dev/null
             APKSIGNER=$(find "$ANDROID_HOME/build-tools" -name apksigner | sort -V | tail -n 1)
-            $APKSIGNER verify --verbose 636mecheri-v1.0.1-release-signed.apk | head -n 15
-            sha256sum 636mecheri-v1.0.1-playstore-signed.aab 636mecheri-v1.0.1-release-signed.apk | tee 636mecheri-v1.0.1-checksums.sha256
+            $APKSIGNER verify --verbose 636mecheri-v1.0.2-release-signed.apk | head -n 15
+            sha256sum 636mecheri-v1.0.2-playstore-signed.aab 636mecheri-v1.0.2-release-signed.apk | tee 636mecheri-v1.0.2-checksums.sha256
           else
-            cp "$AAB_SRC" 636mecheri-v1.0.1-unsigned.aab
-            cp "$APK_SRC" 636mecheri-v1.0.1-unsigned.apk
-            sha256sum 636mecheri-v1.0.1-unsigned.aab 636mecheri-v1.0.1-unsigned.apk | tee 636mecheri-v1.0.1-checksums.sha256
+            cp "$AAB_SRC" 636mecheri-v1.0.2-unsigned.aab
+            cp "$APK_SRC" 636mecheri-v1.0.2-unsigned.apk
+            sha256sum 636mecheri-v1.0.2-unsigned.aab 636mecheri-v1.0.2-unsigned.apk | tee 636mecheri-v1.0.2-checksums.sha256
           fi
 
       - name: Upload Play-Ready Release Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: 636mecheri-v1.0.1-api36-release
+          name: 636mecheri-v1.0.2-api36-release
           path: |
-            636mecheri-v1.0.1-*.aab
-            636mecheri-v1.0.1-*.apk
-            636mecheri-v1.0.1-checksums.sha256
+            636mecheri-v1.0.2-*.aab
+            636mecheri-v1.0.2-*.apk
+            636mecheri-v1.0.2-checksums.sha256
