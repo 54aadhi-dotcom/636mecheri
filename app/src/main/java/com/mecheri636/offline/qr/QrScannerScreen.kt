@@ -29,17 +29,19 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.LocalLifecycleOwner
-import com.google.mlkit.vision.barcode.BarcodeScannerOptions
-import com.google.mlkit.vision.barcode.BarcodeScanning
-import com.google.mlkit.vision.barcode.common.Barcode
-import com.google.mlkit.vision.common.InputImage
+import com.google.zxing.BarcodeFormat
+import com.google.zxing.BinaryBitmap
+import com.google.zxing.DecodeHintType
+import com.google.zxing.MultiFormatReader
+import com.google.zxing.PlanarYUVLuminanceSource
+import com.google.zxing.common.HybridBinarizer
 import java.util.concurrent.Executors
 
 @Composable
 fun OfflineQrScannerScreen(
     title: String = "Offline QR Scanner",
     onQrComplete: (String) -> Unit,
-    onClose: () -> Unit
+    onCancel: () -> Unit
 ) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
@@ -104,7 +106,7 @@ fun OfflineQrScannerScreen(
             verticalAlignment = Alignment.CenterVertically
         ) {
             Text(title, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
-            TextButton(onClick = onClose) { Text("Close") }
+            TextButton(onClick = onCancel) { Text("Close") }
         }
 
         if (alertText != null) {
@@ -147,31 +149,45 @@ fun OfflineQrScannerScreen(
                         val pv = PreviewView(ctx)
                         val fut = ProcessCameraProvider.getInstance(ctx)
                         val exec = Executors.newSingleThreadExecutor()
-                        val opts = BarcodeScannerOptions.Builder()
-                            .setBarcodeFormats(Barcode.FORMAT_QR_CODE).build()
-                        val det = BarcodeScanning.getClient(opts)
+val reader = MultiFormatReader().apply {
+  setHints(mapOf(DecodeHintType.POSSIBLE_FORMATS
+    to listOf(BarcodeFormat.QR_CODE)))
+}
+var lastMs = 0L
                         fut.addListener({
                             val prov = fut.get()
                             val prev = Preview.Builder().build().also { it.setSurfaceProvider(pv.surfaceProvider) }
-                            @OptIn(ExperimentalGetImage::class)
                             val ana = ImageAnalysis.Builder()
                                 .setTargetResolution(Size(1280, 720))
                                 .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                                 .build().also { a ->
-                                    a.setAnalyzer(exec) { p ->
-                                        val m = p.image
-                                        if (m != null) {
-                                            val img = InputImage.fromMediaImage(m, p.imageInfo.rotationDegrees)
-                                            det.process(img)
-                                                .addOnSuccessListener { b ->
-                                                    b.firstOrNull()?.rawValue?.takeIf { it.isNotBlank() }?.let(::handleRaw)
-                                                }
-                                                .addOnCompleteListener { p.close() }
-                                        } else {
-                                            p.close()
-                                        }
-                                    }
-                                }
+  a.setAnalyzer(exec) { p ->
+    try {
+      val pl = p.planes[0]
+      val buf = pl.buffer
+      val rem = buf.remaining()
+      val rs = pl.rowStride
+      val b = ByteArray(maxOf(rem, rs * p.height))
+      buf.get(b, 0, rem)
+      val src = PlanarYUVLuminanceSource(
+        b, rs, p.height, 0, 0, p.width, p.height, false
+      )
+      val bin = BinaryBitmap(HybridBinarizer(src))
+      val txt = reader.decodeWithState(bin).text ?: ""
+      val now = System.currentTimeMillis()
+      if (txt.isNotBlank() && now - lastMs > 700L) {
+        lastMs = now
+        ContextCompat.getMainExecutor(ctx).execute {
+          handleRaw(txt)
+        }
+      }
+    } catch (_: Exception) {
+    } finally {
+      reader.reset()
+      p.close()
+    }
+  }
+}
                             runCatching {
                                 prov.unbindAll()
                                 camRef = prov.bindToLifecycle(lifecycleOwner, CameraSelector.DEFAULT_BACK_CAMERA, prev, ana)
