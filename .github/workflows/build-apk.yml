@@ -2,8 +2,13 @@ name: Build & Verify 636mecheri Play-Ready Offline Release
 
 on:
   push:
+    tags:
+      - 'v*'
     branches: [ main, master ]
   workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
   build_and_audit_release:
@@ -112,3 +117,33 @@ jobs:
             636mecheri-v1.0.2-*.aab
             636mecheri-v1.0.2-*.apk
             636mecheri-v1.0.2-checksums.sha256
+
+      - name: Auto-Publish GitHub Release (on v* tag)
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+          TAG="${GITHUB_REF_NAME}"
+          mkdir -p release-publish
+          APK=$(find . -maxdepth 6 -type f -name '*release*.apk' ! -name '*unsigned*' ! -path './release-publish/*' | head -n 1)
+          if [ -z "$APK" ]; then echo 'Signed release APK not found!'; exit 1; fi
+          OUT_APK="636mecheri-${TAG}-release-signed.apk"
+          OUT_SHA="636mecheri-${TAG}-checksums.sha256"
+          cp "$APK" "release-publish/$OUT_APK"
+          (cd release-publish && sha256sum "$OUT_APK" > "$OUT_SHA")
+          cat <<EOF > release-publish/notes.md
+          100% offline (0% network, 0% tracking) local shop & buyer QR marketplace for Mecheri.
+          மேச்சேரிக்கான 100% ஆஃப்லைன் (0% இணையம்) கடை & வாங்குபவர் QR செயலி.
+
+          - Only permission: CAMERA (strictly for local QR scanning). Works in Airplane Mode.
+          - Install: Download \`$OUT_APK\` -> tap Install (if Play Protect asks, tap More details -> Install anyway).
+          EOF
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" "release-publish/$OUT_APK" "release-publish/$OUT_SHA" --clobber
+          else
+            gh release create "$TAG" "release-publish/$OUT_APK" "release-publish/$OUT_SHA" \
+              --title "636mecheri $TAG — 100% Offline Local Marketplace" \
+              --notes-file release-publish/notes.md \
+              --latest
+          fi
