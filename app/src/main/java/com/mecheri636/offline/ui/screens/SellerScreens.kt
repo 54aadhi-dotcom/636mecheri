@@ -302,7 +302,13 @@ fun SellerBusinessOpsScreen(
     var wasteLoss by remember { mutableStateOf("") }
     var inwardQty by remember { mutableStateOf("") }
     var inwardCost by remember { mutableStateOf("") }
-    val selectedProdId = enabledItems.firstOrNull()?.productId ?: 1
+    var chosenProdId by remember(enabledItems) { mutableStateOf(enabledItems.firstOrNull()?.productId ?: 1) }
+    var prodSearch by remember { mutableStateOf("") }
+    var wastePickerOpen by remember { mutableStateOf(false) }
+    var inwardPickerOpen by remember { mutableStateOf(false) }
+    val activeProd = enabledItems.firstOrNull { it.productId == chosenProdId } ?: enabledItems.firstOrNull()
+    val selectedProdId = activeProd?.productId ?: 1
+    val activeProdLabel = activeProd?.let { "${it.nameEn} (#${it.productId})" } ?: "No Shop Item (#1)"
 
     LazyColumn(
         modifier = Modifier.fillMaxSize().padding(12.dp),
@@ -360,8 +366,28 @@ fun SellerBusinessOpsScreen(
         item {
             Card(modifier = Modifier.fillMaxWidth()) {
                 Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    val prodLabel = enabledItems.firstOrNull()?.nameEn ?: "Tomato (#1)"
+                    val prodLabel = activeProdLabel
                     Text("Log Waste / Spoilage ($prodLabel)", fontWeight = FontWeight.Bold)
+                    Button(onClick = { wastePickerOpen = !wastePickerOpen; prodSearch = "" }, modifier = Modifier.fillMaxWidth()) {
+                        Text(if (wastePickerOpen) "Close Product List" else "Change Product / பொருள் மாற்று (${enabledItems.size})")
+                    }
+                    if (wastePickerOpen) {
+                        OutlinedTextField(
+                            value = prodSearch, onValueChange = { prodSearch = it },
+                            label = { Text("Search product / பொருள் தேடு") },
+                            singleLine = true, modifier = Modifier.fillMaxWidth()
+                        )
+                        enabledItems.filter {
+                            prodSearch.isBlank() || it.nameEn.contains(prodSearch, ignoreCase = true) || it.productId.toString().contains(prodSearch)
+                        }.take(20).forEach { p ->
+                            FilterChip(
+                                selected = p.productId == selectedProdId,
+                                onClick = { chosenProdId = p.productId; wastePickerOpen = false; prodSearch = "" },
+                                label = { Text("${p.nameEn} (#${p.productId})") },
+                                modifier = Modifier.fillMaxWidth()
+                            )
+                        }
+                    }
                     OutlinedTextField(
                         value = wasteQty, onValueChange = { wasteQty = it },
                         label = { Text("Spoiled Qty (kg/pc)") },
@@ -389,8 +415,28 @@ fun SellerBusinessOpsScreen(
         item {
             Card(modifier = Modifier.fillMaxWidth()) {
                 Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    val prodLabel = enabledItems.firstOrNull()?.nameEn ?: "Tomato (#1)"
+                    val prodLabel = activeProdLabel
                     Text("Stock Inward / சரக்கு வரவு ($prodLabel)", fontWeight = FontWeight.Bold)
+                    Button(onClick = { inwardPickerOpen = !inwardPickerOpen; prodSearch = "" }, modifier = Modifier.fillMaxWidth()) {
+                        Text(if (inwardPickerOpen) "Close Product List" else "Change Product / பொருள் மாற்று (${enabledItems.size})")
+                    }
+                    if (inwardPickerOpen) {
+                        OutlinedTextField(
+                            value = prodSearch, onValueChange = { prodSearch = it },
+                            label = { Text("Search product / பொருள் தேடு") },
+                            singleLine = true, modifier = Modifier.fillMaxWidth()
+                        )
+                        enabledItems.filter {
+                            prodSearch.isBlank() || it.nameEn.contains(prodSearch, ignoreCase = true) || it.productId.toString().contains(prodSearch)
+                        }.take(20).forEach { p ->
+                            FilterChip(
+                                selected = p.productId == selectedProdId,
+                                onClick = { chosenProdId = p.productId; inwardPickerOpen = false; prodSearch = "" },
+                                label = { Text("${p.nameEn} (#${p.productId})") },
+                                modifier = Modifier.fillMaxWidth()
+                            )
+                        }
+                    }
                     OutlinedTextField(
                         value = inwardQty, onValueChange = { inwardQty = it },
                         label = { Text("Added Qty (kg/pc)") },

@@ -152,7 +152,12 @@ fun MecheriRootApp(vm: MecheriViewModel) {
         ) { padding ->
             Box(modifier = Modifier.fillMaxSize().padding(padding)) {
                 if (selectedTab == 3) {
-                    TrustVerifierScreen(report = auditReport, onReRunAudit = { vm.refreshOfflineAudit() })
+                    TrustVerifierScreen(
+                        report = auditReport,
+                        onReRunAudit = { vm.refreshOfflineAudit() },
+                        lockManager = vm.appLockManager,
+                        onLockNow = { vm.checkAppLock() }
+                    )
                 } else if (role == UserRole.SELLER) {
                     val profile = sellerProfile
                     if (profile == null) {
