@@ -1,174 +1,219 @@
 package com.mecheri636.offline.qr
 
 import android.Manifest
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
 import android.content.pm.PackageManager
+import android.util.Size
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.annotation.OptIn
+import androidx.camera.core.Camera
 import androidx.camera.core.CameraSelector
+import androidx.camera.core.ExperimentalGetImage
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.Preview
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
+import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
-import com.google.zxing.*
-import com.google.zxing.common.HybridBinarizer
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import com.google.mlkit.vision.barcode.BarcodeScannerOptions
+import com.google.mlkit.vision.barcode.BarcodeScanning
+import com.google.mlkit.vision.barcode.common.Barcode
+import com.google.mlkit.vision.common.InputImage
 import java.util.concurrent.Executors
 
 @Composable
 fun OfflineQrScannerScreen(
-    title: String,
+    title: String = "Offline QR Scanner",
     onQrComplete: (String) -> Unit,
-    onCancel: () -> Unit
+    onClose: () -> Unit
 ) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
-    var hasCameraPerm by remember {
+
+    var hasCam by remember {
         mutableStateOf(
             ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) ==
                 PackageManager.PERMISSION_GRANTED
         )
     }
-    var frameStatus by remember { mutableStateOf("Point camera at 636mecheri QR / QR-ஐ நோக்கவும்") }
-    val assembler = remember { MultiFrameQrAssembler() }
-    var alreadyDelivered by remember { mutableStateOf(false) }
+    var torchOn by remember { mutableStateOf(false) }
+    var zoomVal by remember { mutableFloatStateOf(1.0f) }
+    var camRef by remember { mutableStateOf<Camera?>(null) }
+    var alertText by remember { mutableStateOf<String?>(null) }
+    var upiInfo by remember { mutableStateOf<ParsedUpiPayment?>(null) }
+    var statusMsg by remember { mutableStateOf("Align QR in frame (100% offline)") }
+    var manualText by remember { mutableStateOf("") }
+    var showManual by remember { mutableStateOf(false) }
 
-    val launcher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
-        hasCameraPerm = granted
-    }
+    val reqCam = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { ok -> hasCam = ok }
 
     LaunchedEffect(Unit) {
-        if (!hasCameraPerm) launcher.launch(Manifest.permission.CAMERA)
+        if (!hasCam) reqCam.launch(Manifest.permission.CAMERA)
+    }
+    LaunchedEffect(torchOn, camRef) {
+        camRef?.cameraControl?.enableTorch(torchOn)
+    }
+    LaunchedEffect(zoomVal, camRef) {
+        camRef?.cameraControl?.setZoomRatio(zoomVal)
     }
 
-    Column(modifier = Modifier.fillMaxSize()) {
-        Surface(tonalElevation = 3.dp, modifier = Modifier.fillMaxWidth()) {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(12.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceBetween
-            ) {
-                Text(title, style = MaterialTheme.typography.titleMedium)
-                TextButton(onClick = onCancel) { Text("Close / மூடு") }
+    fun handleRaw(raw: String) {
+        when (val v = QrFirewall.inspect(raw)) {
+            is QrFirewallVerdict.AllowedMecheri -> {
+                alertText = null
+                upiInfo = null
+                statusMsg = "Verified (${v.payload.length} chars)"
+                onQrComplete(v.payload)
+            }
+            is QrFirewallVerdict.AllowedUpi -> {
+                alertText = null
+                upiInfo = v.upi
+                statusMsg = "UPI: ${v.upi.vpa}"
+            }
+            is QrFirewallVerdict.Blocked -> {
+                upiInfo = null
+                alertText = "${v.reason}: ${v.preview}"
+                statusMsg = "Blocked unsafe QR"
+            }
+        }
+    }
+
+    Column(
+        modifier = Modifier.fillMaxSize().padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp)
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(title, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+            TextButton(onClick = onClose) { Text("Close") }
+        }
+
+        if (alertText != null) {
+            Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer)) {
+                Text(alertText!!, modifier = Modifier.padding(12.dp))
             }
         }
 
-        if (!hasCameraPerm) {
-            Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.padding(24.dp)) {
-                    Text("Camera permission is required for 100% offline QR scanning.")
-                    Text("ஆஃப்லைன் QR ஸ்கேன் செய்ய கேமரா அனுமதி அவசியம்.")
-                    Spacer(Modifier.height(12.dp))
-                    Button(onClick = { launcher.launch(Manifest.permission.CAMERA) }) {
-                        Text("Allow Camera / கேமரா அனுமதி")
+        upiInfo?.let { u ->
+            Card(modifier = Modifier.fillMaxWidth()) {
+                Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text("${u.payeeName} (${u.vpa})", fontWeight = FontWeight.Bold)
+                    u.amountPaise?.let { Text("Amt: Rs. ${"%.2f".format(it / 100.0)}") }
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Button(onClick = {
+                            runCatching { context.startActivity(QrFirewall.buildUpiAppSwitchIntent(u.rawUri)) }
+                        }) { Text("Open UPI") }
+                        OutlinedButton(onClick = {
+                            val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                            cm.setPrimaryClip(ClipData.newPlainText("UPI", u.vpa))
+                        }) { Text("Copy ID") }
                     }
                 }
             }
+        }
+
+        if (!hasCam) {
+            Button(onClick = { reqCam.launch(Manifest.permission.CAMERA) }) {
+                Text("Grant Camera Permission")
+            }
         } else {
-            Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
+            Box(
+                modifier = Modifier.fillMaxWidth().weight(1f)
+                    .border(2.dp, MaterialTheme.colorScheme.primary, RoundedCornerShape(12.dp)),
+                contentAlignment = Alignment.Center
+            ) {
                 AndroidView(
                     modifier = Modifier.fillMaxSize(),
                     factory = { ctx ->
-                        val previewView = PreviewView(ctx)
-                        val cameraProviderFuture = ProcessCameraProvider.getInstance(ctx)
-                        val executor = Executors.newSingleThreadExecutor()
-                        val reader = MultiFormatReader().apply {
-                            setHints(mapOf(DecodeHintType.POSSIBLE_FORMATS to listOf(BarcodeFormat.QR_CODE)))
-                        }
-
-                        cameraProviderFuture.addListener({
-                            val provider = cameraProviderFuture.get()
-                            val preview = Preview.Builder().build().also {
-                                it.setSurfaceProvider(previewView.surfaceProvider)
-                            }
-                            val analysis = ImageAnalysis.Builder()
+                        val pv = PreviewView(ctx)
+                        val fut = ProcessCameraProvider.getInstance(ctx)
+                        val exec = Executors.newSingleThreadExecutor()
+                        val opts = BarcodeScannerOptions.Builder()
+                            .setBarcodeFormats(Barcode.FORMAT_QR_CODE).build()
+                        val det = BarcodeScanning.getClient(opts)
+                        fut.addListener({
+                            val prov = fut.get()
+                            val prev = Preview.Builder().build().also { it.setSurfaceProvider(pv.surfaceProvider) }
+                            @OptIn(ExperimentalGetImage::class)
+                            val ana = ImageAnalysis.Builder()
+                                .setTargetResolution(Size(1280, 720))
                                 .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
-                                .build()
-
-                            analysis.setAnalyzer(executor) { imageProxy ->
-                                try {
-                                    if (!alreadyDelivered) {
-                                        val buffer = imageProxy.planes[0].buffer
-                                        val bytes = ByteArray(buffer.remaining())
-                                        buffer.get(bytes)
-                                        val source = PlanarYUVLuminanceSource(
-                                            bytes,
-                                            imageProxy.width,
-                                            imageProxy.height,
-                                            0,
-                                            0,
-                                            imageProxy.width,
-                                            imageProxy.height,
-                                            false
-                                        )
-                                        val bitmap = BinaryBitmap(HybridBinarizer(source))
-                                        val result = reader.decodeWithState(bitmap)
-                                        val text = result.text
-                                        if (!text.isNullOrBlank()) {
-                                            when (val assembled = assembler.feed(text)) {
-                                                is MultiFrameQrAssembler.Result.Progress -> {
-                                                    frameStatus = "Multi-QR frame ${assembled.received}/${assembled.total} scanned — hold steady..."
+                                .build().also { a ->
+                                    a.setAnalyzer(exec) { p ->
+                                        val m = p.image
+                                        if (m != null) {
+                                            val img = InputImage.fromMediaImage(m, p.imageInfo.rotationDegrees)
+                                            det.process(img)
+                                                .addOnSuccessListener { b ->
+                                                    b.firstOrNull()?.rawValue?.takeIf { it.isNotBlank() }?.let(::handleRaw)
                                                 }
-                                                is MultiFrameQrAssembler.Result.Complete -> {
-                                                    alreadyDelivered = true
-                                                    ContextCompat.getMainExecutor(ctx).execute {
-                                                        onQrComplete(assembled.fullPayload)
-                                                    }
-                                                }
-                                            }
+                                                .addOnCompleteListener { p.close() }
+                                        } else {
+                                            p.close()
                                         }
                                     }
-                                } catch (_: NotFoundException) {
-                                    // No QR in this frame
-                                } catch (_: Exception) {
-                                    // Ignore transient decode error
-                                } finally {
-                                    reader.reset()
-                                    imageProxy.close()
                                 }
-                            }
-
-                            try {
-                                provider.unbindAll()
-                                provider.bindToLifecycle(
-                                    lifecycleOwner,
-                                    CameraSelector.DEFAULT_BACK_CAMERA,
-                                    preview,
-                                    analysis
-                                )
-                            } catch (_: Exception) {
+                            runCatching {
+                                prov.unbindAll()
+                                camRef = prov.bindToLifecycle(lifecycleOwner, CameraSelector.DEFAULT_BACK_CAMERA, prev, ana)
                             }
                         }, ContextCompat.getMainExecutor(ctx))
-
-                        previewView
+                        pv
                     }
                 )
-
                 Surface(
-                    color = MaterialTheme.colorScheme.surface.copy(alpha = 0.88f),
-                    modifier = Modifier
-                        .align(Alignment.BottomCenter)
-                        .fillMaxWidth()
-                        .padding(16.dp),
-                    shape = MaterialTheme.shapes.medium
+                    color = MaterialTheme.colorScheme.surface.copy(alpha = 0.85f),
+                    shape = RoundedCornerShape(8.dp),
+                    modifier = Modifier.align(Alignment.BottomCenter).padding(10.dp)
                 ) {
-                    Text(
-                        text = frameStatus,
-                        modifier = Modifier.padding(12.dp),
-                        style = MaterialTheme.typography.bodyMedium
-                    )
+                    Text(statusMsg, modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp), style = MaterialTheme.typography.bodySmall)
                 }
             }
+        }
+
+        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            OutlinedButton(onClick = { torchOn = !torchOn }, modifier = Modifier.weight(1f)) {
+                Text(if (torchOn) "Torch ON" else "Torch OFF")
+            }
+            OutlinedButton(onClick = { zoomVal = if (zoomVal < 1.8f) 2.0f else 1.0f }, modifier = Modifier.weight(1f)) {
+                Text("Zoom ${zoomVal.toInt()}x")
+            }
+            OutlinedButton(onClick = { showManual = !showManual }, modifier = Modifier.weight(1f)) {
+                Text(if (showManual) "Hide" else "Paste")
+            }
+        }
+
+        if (showManual) {
+            OutlinedTextField(
+                value = manualText,
+                onValueChange = { manualText = it },
+                label = { Text("QR payload") },
+                modifier = Modifier.fillMaxWidth(),
+                maxLines = 2
+            )
+            Button(
+                onClick = { if (manualText.isNotBlank()) handleRaw(manualText.trim()) },
+                modifier = Modifier.fillMaxWidth()
+            ) { Text("Verify & Process") }
         }
     }
 }

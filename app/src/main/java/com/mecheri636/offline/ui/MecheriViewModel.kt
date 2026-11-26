@@ -461,4 +461,19 @@ class MecheriViewModel(application: Application) : AndroidViewModel(application)
             _auditReport.value = OfflineTrustVerifier.runLiveAudit(getApplication())
         }
     }
+
+    val appLockManager by lazy {
+        com.mecheri636.offline.security.AppLockManager(getApplication())
+    }
+
+    private val _isLocked = MutableStateFlow(false)
+    val isLocked: StateFlow<Boolean> = _isLocked.asStateFlow()
+
+    fun checkAppLock() {
+        _isLocked.value = appLockManager.isLockEnabled()
+    }
+
+    fun unlockApp() {
+        _isLocked.value = false
+    }
 }

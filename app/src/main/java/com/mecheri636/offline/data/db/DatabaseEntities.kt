@@ -34,7 +34,10 @@ data class SellerProfileEntity(
     @ColumnInfo(name = "shop_name") val shopName: String,
     @ColumnInfo(name = "shop_area") val shopArea: String = "Mecheri",
     @ColumnInfo(name = "pin_hash") val pinHash: String? = null,
-    @ColumnInfo(name = "created_at") val createdAt: Long
+    @ColumnInfo(name = "created_at") val createdAt: Long,
+    @ColumnInfo(name = "upi_vpa") val upiVpa: String = "",
+    @ColumnInfo(name = "upi_payee_name") val upiPayeeName: String = "",
+    @ColumnInfo(name = "upi_static_raw") val upiStaticRaw: String = ""
 )
 
 @Entity(
@@ -67,10 +70,22 @@ data class SellerShopItemEntity(
     @ColumnInfo(name = "low_stock_milli") val lowStockMilli: Long = 2000L,
     @ColumnInfo(name = "cost_price_paise") val costPricePaise: Long = 0L,
     @ColumnInfo(name = "order_count") val orderCount: Int = 0,
-    @ColumnInfo(name = "updated_at") val updatedAt: Long = 0L
+    @ColumnInfo(name = "updated_at") val updatedAt: Long = 0L,
+    @ColumnInfo(name = "bulk_min_qty_milli") val bulkMinQtyMilli: Long = 0L,
+    @ColumnInfo(name = "bulk_price_paise") val bulkPricePaise: Long = 0L,
+    @ColumnInfo(name = "min_order_milli") val minOrderMilli: Long = 100L,
+    @ColumnInfo(name = "step_qty_milli") val stepQtyMilli: Long = 100L,
+    @ColumnInfo(name = "variety_tag") val varietyTag: String = ""
 )
 
-@Entity(tableName = "seller_orders", indices = [Index(value = ["created_at"])])
+@Entity(
+    tableName = "seller_orders",
+    indices = [
+        Index(value = ["created_at"]),
+        Index(value = ["payment_status"]),
+        Index(value = ["cart_nonce"])
+    ]
+)
 data class SellerOrderEntity(
     @PrimaryKey(autoGenerate = true)
     @ColumnInfo(name = "order_id") val orderId: Long = 0L,
@@ -79,7 +94,17 @@ data class SellerOrderEntity(
     @ColumnInfo(name = "total_paise") val totalPaise: Long,
     @ColumnInfo(name = "cogs_paise") val cogsPaise: Long,
     @ColumnInfo(name = "item_count") val itemCount: Int,
-    @ColumnInfo(name = "created_at") val createdAt: Long
+    @ColumnInfo(name = "created_at") val createdAt: Long,
+    @ColumnInfo(name = "original_total_paise") val originalTotalPaise: Long = totalPaise,
+    @ColumnInfo(name = "collected_paise") val collectedPaise: Long = totalPaise,
+    @ColumnInfo(name = "cash_paise") val cashPaise: Long = totalPaise,
+    @ColumnInfo(name = "upi_paise") val upiPaise: Long = 0L,
+    @ColumnInfo(name = "variance_paise") val variancePaise: Long = 0L,
+    @ColumnInfo(name = "variance_reason") val varianceReason: String = "EXACT",
+    @ColumnInfo(name = "payment_status") val paymentStatus: String = "PAID",
+    @ColumnInfo(name = "payment_mode") val paymentMode: String = "CASH",
+    @ColumnInfo(name = "utr_note") val utrNote: String = "",
+    @ColumnInfo(name = "cart_nonce") val cartNonce: String = ""
 )
 
 @Entity(
@@ -100,7 +125,11 @@ data class SellerOrderItemEntity(
     @ColumnInfo(name = "product_id") val productId: Int,
     @ColumnInfo(name = "qty_milli") val qtyMilli: Long,
     @ColumnInfo(name = "unit_price_paise") val unitPricePaise: Long,
-    @ColumnInfo(name = "line_total_paise") val lineTotalPaise: Long
+    @ColumnInfo(name = "line_total_paise") val lineTotalPaise: Long,
+    @ColumnInfo(name = "product_name_snapshot") val productNameSnapshot: String = "",
+    @ColumnInfo(name = "unit_cogs_paise") val unitCogsPaise: Long = 0L,
+    @ColumnInfo(name = "is_freebie") val isFreebie: Boolean = false,
+    @ColumnInfo(name = "returned_qty_milli") val returnedQtyMilli: Long = 0L
 )
 
 @Entity(tableName = "seller_stock_ledger", indices = [Index(value = ["product_id"]), Index(value = ["created_at"])])
@@ -139,7 +168,11 @@ data class BuyerSavedShopEntity(
     @ColumnInfo(name = "shop_id") val shopId: String,
     @ColumnInfo(name = "shop_name") val shopName: String,
     @ColumnInfo(name = "seller_catalog_ver") val sellerCatalogVer: Int,
-    @ColumnInfo(name = "last_synced_at") val lastSyncedAt: Long
+    @ColumnInfo(name = "last_synced_at") val lastSyncedAt: Long,
+    @ColumnInfo(name = "shop_landmark") val shopLandmark: String = "",
+    @ColumnInfo(name = "is_favorite") val isFavorite: Boolean = false,
+    @ColumnInfo(name = "board_valid_until") val boardValidUntil: Long = 0L,
+    @ColumnInfo(name = "upi_vpa") val upiVpa: String = ""
 )
 
 @Entity(
@@ -160,7 +193,13 @@ data class BuyerShopPriceEntity(
     @ColumnInfo(name = "product_id") val productId: Int,
     @ColumnInfo(name = "price_paise") val pricePaise: Long,
     @ColumnInfo(name = "quality_grade") val qualityGrade: String,
-    @ColumnInfo(name = "stock_status") val stockStatus: Int
+    @ColumnInfo(name = "stock_status") val stockStatus: Int,
+    @ColumnInfo(name = "stock_qty_milli") val stockQtyMilli: Long = 0L,
+    @ColumnInfo(name = "bulk_min_qty_milli") val bulkMinQtyMilli: Long = 0L,
+    @ColumnInfo(name = "bulk_price_paise") val bulkPricePaise: Long = 0L,
+    @ColumnInfo(name = "min_order_milli") val minOrderMilli: Long = 100L,
+    @ColumnInfo(name = "step_qty_milli") val stepQtyMilli: Long = 100L,
+    @ColumnInfo(name = "variety_tag") val varietyTag: String = ""
 )
 
 @Entity(tableName = "buyer_hidden_products")
@@ -191,6 +230,52 @@ data class BuyerReceiptEntity(
     @ColumnInfo(name = "receipt_code") val receiptCode: String,
     @ColumnInfo(name = "total_paise") val totalPaise: Long,
     @ColumnInfo(name = "items_summary") val itemsSummary: String,
+    @ColumnInfo(name = "created_at") val createdAt: Long,
+    @ColumnInfo(name = "original_total_paise") val originalTotalPaise: Long = totalPaise,
+    @ColumnInfo(name = "paid_paise") val paidPaise: Long = totalPaise,
+    @ColumnInfo(name = "variance_reason") val varianceReason: String = "EXACT",
+    @ColumnInfo(name = "payment_mode") val paymentMode: String = "CASH"
+)
+
+@Entity(tableName = "draft_state")
+data class DraftStateEntity(
+    @PrimaryKey
+    @ColumnInfo(name = "draft_key") val draftKey: String,
+    @ColumnInfo(name = "payload_json") val payloadJson: String,
+    @ColumnInfo(name = "updated_at") val updatedAt: Long
+)
+
+@Entity(tableName = "audit_log", indices = [Index(value = ["created_at"])])
+data class AuditLogEntity(
+    @PrimaryKey(autoGenerate = true) val id: Long = 0L,
+    @ColumnInfo(name = "action_type") val actionType: String,
+    @ColumnInfo(name = "ref_id") val refId: String,
+    @ColumnInfo(name = "summary") val summary: String,
+    @ColumnInfo(name = "delta_paise") val deltaPaise: Long = 0L,
+    @ColumnInfo(name = "actor_mode") val actorMode: String = "OWNER",
+    @ColumnInfo(name = "created_at") val createdAt: Long
+)
+
+@Entity(tableName = "customer_udhaar", indices = [Index(value = ["alias"])])
+data class CustomerUdhaarEntity(
+    @PrimaryKey(autoGenerate = true)
+    @ColumnInfo(name = "customer_id") val customerId: Long = 0L,
+    @ColumnInfo(name = "alias") val alias: String,
+    @ColumnInfo(name = "area_note") val areaNote: String = "",
+    @ColumnInfo(name = "balance_paise") val balancePaise: Long = 0L,
+    @ColumnInfo(name = "risk_tag") val riskTag: String = "NORMAL",
+    @ColumnInfo(name = "updated_at") val updatedAt: Long
+)
+
+@Entity(tableName = "cash_z_reports", indices = [Index(value = ["day_key"])])
+data class CashZReportEntity(
+    @PrimaryKey(autoGenerate = true) val id: Long = 0L,
+    @ColumnInfo(name = "day_key") val dayKey: String,
+    @ColumnInfo(name = "opening_float_paise") val openingFloatPaise: Long,
+    @ColumnInfo(name = "expected_cash_paise") val expectedCashPaise: Long,
+    @ColumnInfo(name = "counted_cash_paise") val countedCashPaise: Long,
+    @ColumnInfo(name = "variance_paise") val variancePaise: Long,
+    @ColumnInfo(name = "note") val note: String = "",
     @ColumnInfo(name = "created_at") val createdAt: Long
 )
 
@@ -211,5 +296,10 @@ data class CatalogDisplayItem(
     val stockQtyMilli: Long,
     val orderCount: Int,
     val updatedAt: Long,
-    val buyerCartQtyMilli: Long = 0L
+    val buyerCartQtyMilli: Long = 0L,
+    val bulkMinQtyMilli: Long = 0L,
+    val bulkPricePaise: Long = 0L,
+    val minOrderMilli: Long = 100L,
+    val stepQtyMilli: Long = 100L,
+    val varietyTag: String = ""
 )

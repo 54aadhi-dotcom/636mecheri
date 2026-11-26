@@ -50,6 +50,8 @@ fun MecheriRootApp(vm: MecheriViewModel) {
     val lastReceiptQr by vm.lastReceiptQr.collectAsStateWithLifecycle()
     val auditReport by vm.auditReport.collectAsStateWithLifecycle()
     val statusMsg by vm.statusMessage.collectAsStateWithLifecycle()
+    val isLocked by vm.isLocked.collectAsStateWithLifecycle()
+    LaunchedEffect(Unit) { vm.checkAppLock() }
 
     var selectedTab by remember(role) { mutableStateOf(0) }
     var activeScanner by remember { mutableStateOf(ActiveScanner.NONE) }
@@ -65,7 +67,12 @@ fun MecheriRootApp(vm: MecheriViewModel) {
     }
 
     MaterialTheme(colorScheme = colorScheme) {
-        if (activeScanner != ActiveScanner.NONE) {
+        if (isLocked) {
+            AppLockGateScreen(
+                lockManager = vm.appLockManager,
+                onUnlocked = { vm.unlockApp() }
+            )
+        } else if (activeScanner != ActiveScanner.NONE) {
             OfflineQrScannerScreen(
                 title = when (activeScanner) {
                     ActiveScanner.BUYER_SCAN_SHOP -> "Scan Shop Board QR"
