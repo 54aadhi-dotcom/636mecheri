@@ -257,4 +257,56 @@ class MecheriViewModel(application: Application) : AndroidViewModel(application)
     fun checkAppLock() { _isLocked.value = appLockManager.isLockEnabled() && appLockManager.getConfig().scope == LockScope.FULL_APP }
     fun lockAfterBackground(lastActiveMs: Long) { if (appLockManager.getConfig().scope == LockScope.FULL_APP && appLockManager.shouldLockAfterBackground(lastActiveMs)) _isLocked.value = true }
     fun unlockApp() { _isLocked.value = false }
+    private val _lastSosChunk = MutableStateFlow<QrCodec.SosRelayChunk?>(null)
+    val lastSosChunk = _lastSosChunk.asStateFlow()
+    fun clearLastSos() { _lastSosChunk.value = null }
+
+    fun buildSosQrFrames(kind: String): List<String> {
+        val m = System.currentTimeMillis() / 60000L; val sid = "SOS${m % 10000}"
+        return when (kind) {
+            "X1" -> {
+                val p = sellerProfile.value ?: return emptyList()
+                val body = rawSellerCatalog.value.filter { it.isEnabledInShop && it.pricePaise > 0L }.take(25).joinToString(",") { "${it.productId}:${it.pricePaise}" }
+                QrCodec.encodeSosChunk(QrCodec.SosRelayChunk("X1", sid, p.shopId, p.shopName, p.upiVpa, m, body))
+            }
+            "B1" -> {
+                val shopId = _selectedBuyerShopId.value ?: return emptyList()
+                val shop = savedShops.value.firstOrNull { it.shopId == shopId }
+                val cart = activeBuyerCart.value; if (cart.isEmpty()) return emptyList()
+                val body = cart.joinToString(",") { "${it.productId}:${it.qtyMilli}" }
+                QrCodec.encodeSosChunk(QrCodec.SosRelayChunk("B1", sid, shopId, shop?.shopName ?: shopId, shop?.upiVpa ?: "", m, body))
+            }
+            else -> {
+                val p = sellerProfile.value ?: return emptyList(); val r = profitReport.value
+                val body = "ORD=${r.completedOrders},CASH=${r.cashPaise},UPI=${r.upiPaise},NET=${r.trueNetProfitPaise}"
+                QrCodec.encodeSosChunk(QrCodec.SosRelayChunk("X3", sid, p.shopId, p.shopName, p.upiVpa, m, body))
+            }
+        }
+    }
+    fun handleScannedSosQr(qrText: String) = viewModelScope.launch {
+        try {
+            val c = QrCodec.decodeSosChunk(qrText); _lastSosChunk.value = c; val now = System.currentTimeMillis()
+            when (c.kind) {
+                "B1" -> {
+                    val pairs = c.body.split(",").mapNotNull { t -> val s = t.split(":"); if (s.size == 2) s[0].toIntOrNull()?.let { id -> s[1].toLongOrNull()?.let { q -> id to q } } else null }
+                    if (pairs.isNotEmpty()) {
+                        selectBuyerShop(c.shopId)
+                        pairs.forEach { (id, q) -> val pr = rawBuyerCatalog.value.firstOrNull { it.productId == id }?.pricePaise ?: 0L; dao.upsertCartItem(BuyerCartItemEntity(c.shopId, id, q, pr, now)) }
+                        _statusMessage.value = "SOS Cart (${pairs.size} items) imported!"
+                    }
+                }
+                "X1" -> {
+                    val prices = c.body.split(",").mapNotNull { t -> val s = t.split(":"); if (s.size == 2) s[0].toIntOrNull()?.let { id -> s[1].toLongOrNull()?.let { pr -> BuyerShopPriceEntity(c.shopId, id, pr, "A", 1) } } else null }
+                    if (prices.isNotEmpty()) {
+                        dao.replaceShopCatalogSnapshot(BuyerSavedShopEntity(c.shopId, c.shopName, 1, now, "SOS", false, 0L, c.upiVpa), prices)
+                        selectBuyerShop(c.shopId); _statusMessage.value = "SOS Shop '${c.shopName}' (${prices.size} items) loaded!"
+                    }
+                }
+                "X3" -> {
+                    dao.insertAuditLog(AuditLogEntity(actionType = "SOS_X3", refId = c.relaySessionId, summary = "${c.shopName}: ${c.body}", createdAt = now))
+                    _statusMessage.value = "SOS Return Sync logged (${c.relaySessionId})"
+                }
+            }
+        } catch (e: Exception) { _statusMessage.value = "Invalid SOS QR: ${e.message}" }
+    }
 }

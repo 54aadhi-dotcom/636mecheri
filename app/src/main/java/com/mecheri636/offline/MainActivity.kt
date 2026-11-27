@@ -20,7 +20,7 @@ import com.mecheri636.offline.ui.MecheriViewModel
 import com.mecheri636.offline.ui.catalog.*
 import com.mecheri636.offline.ui.screens.*
 
-private enum class ActiveScanner { NONE, BUYER_SCAN_SHOP, BUYER_SCAN_RECEIPT, SELLER_SCAN_CART }
+private enum class ActiveScanner { NONE, BUYER_SCAN_SHOP, BUYER_SCAN_RECEIPT, SELLER_SCAN_CART, SCAN_SOS }
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -46,6 +46,7 @@ fun MecheriRootApp(vm: MecheriViewModel) {
     val udhaarList by vm.customerUdhaar.collectAsStateWithLifecycle()
     val zReports by vm.cashZReports.collectAsStateWithLifecycle()
     val auditLogs by vm.auditLogs.collectAsStateWithLifecycle()
+    val lastSos by vm.lastSosChunk.collectAsStateWithLifecycle()
     val packingSummary by vm.packingSummary.collectAsStateWithLifecycle()
     val lastReceiptQr by vm.lastReceiptQr.collectAsStateWithLifecycle()
     val auditReport by vm.auditReport.collectAsStateWithLifecycle()
@@ -63,13 +64,14 @@ fun MecheriRootApp(vm: MecheriViewModel) {
         if (isLocked) { AppLockGateScreen(vm.appLockManager) { vm.unlockApp() }; return@MaterialTheme }
         if (activeScanner != ActiveScanner.NONE) {
             OfflineQrScannerScreen(
-                title = when (activeScanner) { ActiveScanner.BUYER_SCAN_SHOP -> "Scan Shop QR"; ActiveScanner.BUYER_SCAN_RECEIPT -> "Scan Receipt QR"; else -> "Scan Cart QR" },
+                title = when (activeScanner) { ActiveScanner.BUYER_SCAN_SHOP -> "Scan Shop QR"; ActiveScanner.BUYER_SCAN_RECEIPT -> "Scan Receipt QR"; ActiveScanner.SCAN_SOS -> "Scan SOS QR"; else -> "Scan Cart QR" },
                 onQrComplete = { qr ->
                     val m = activeScanner; activeScanner = ActiveScanner.NONE
                     when (m) {
                         ActiveScanner.BUYER_SCAN_SHOP -> { vm.handleScannedShopBoardQr(qr); selectedTab = 1 }
                         ActiveScanner.BUYER_SCAN_RECEIPT -> vm.handleScannedReceiptQr(qr)
                         ActiveScanner.SELLER_SCAN_CART -> { vm.handleScannedBuyerCartQr(qr); selectedTab = 1 }
+                        ActiveScanner.SCAN_SOS -> vm.handleScannedSosQr(qr)
                         else -> Unit
                     }
                 },
@@ -121,7 +123,7 @@ fun MecheriRootApp(vm: MecheriViewModel) {
                     }
                 } else {
                     when (selectedTab) {
-                        0 -> BuyerSavedShopsScreen(savedShops, selectedShopId, { id -> vm.selectBuyerShop(id); selectedTab = 1 }, { activeScanner = ActiveScanner.BUYER_SCAN_SHOP })
+                        0 -> BuyerShopsHubScreen(savedShops, selectedShopId, rawSellerItems, lastSos, { id -> vm.selectBuyerShop(id); selectedTab = 1 }, { activeScanner = ActiveScanner.BUYER_SCAN_SHOP }, { id -> vm.observeProductComparison(id) }, { rs, pr -> vm.computeQtyForRupees(rs, pr) }, { sid, id, q, p -> vm.selectBuyerShop(sid); vm.setBuyerCartQuantity(id, q, p); selectedTab = 2 }, { k -> vm.buildSosQrFrames(k) }, { activeScanner = ActiveScanner.SCAN_SOS }, { vm.clearLastSos() })
                         1 -> Column(Modifier.fillMaxSize()) {
                             CatalogToolbar(UserRole.BUYER, filter, vm::updateFilter, { showSort = true }, { showFilter = true }, { showCustom = true })
                             val vis = remember(rawBuyerItems, filter) { CatalogFilterEngine.apply(rawBuyerItems, UserRole.BUYER, filter) }
