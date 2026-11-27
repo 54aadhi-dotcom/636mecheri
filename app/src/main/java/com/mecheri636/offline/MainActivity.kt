@@ -25,10 +25,7 @@ private enum class ActiveScanner { NONE, BUYER_SCAN_SHOP, BUYER_SCAN_RECEIPT, SE
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        setContent {
-            val vm: MecheriViewModel = viewModel()
-            MecheriRootApp(vm)
-        }
+        setContent { MecheriRootApp(viewModel()) }
     }
 }
 
@@ -52,243 +49,89 @@ fun MecheriRootApp(vm: MecheriViewModel) {
     val statusMsg by vm.statusMessage.collectAsStateWithLifecycle()
     val isLocked by vm.isLocked.collectAsStateWithLifecycle()
     LaunchedEffect(Unit) { vm.checkAppLock() }
-
     var selectedTab by remember(role) { mutableStateOf(0) }
     var activeScanner by remember { mutableStateOf(ActiveScanner.NONE) }
-    var showSortDialog by remember { mutableStateOf(false) }
-    var showFilterDialog by remember { mutableStateOf(false) }
-    var showCustomizeDialog by remember { mutableStateOf(false) }
-    var editingSellerItem by remember { mutableStateOf<CatalogDisplayItem?>(null) }
-
-    val colorScheme = if (customization.themeMode == AppThemeMode.OLED_DARK) {
-        darkColorScheme(primary = Color(0xFF81C784), background = Color.Black, surface = Color(0xFF121212))
-    } else {
-        lightColorScheme(primary = Color(0xFF1B5E20), secondaryContainer = Color(0xFFE8F5E9))
-    }
-
-    MaterialTheme(colorScheme = colorScheme) {
-        if (isLocked) {
-            AppLockGateScreen(
-                lockManager = vm.appLockManager,
-                onUnlocked = { vm.unlockApp() }
-            )
-        } else if (activeScanner != ActiveScanner.NONE) {
+    var showSort by remember { mutableStateOf(false) }
+    var showFilter by remember { mutableStateOf(false) }
+    var showCustom by remember { mutableStateOf(false) }
+    var editItem by remember { mutableStateOf<CatalogDisplayItem?>(null) }
+    val colors = if (customization.themeMode == AppThemeMode.OLED_DARK) darkColorScheme(primary = Color(0xFF81C784), background = Color.Black, surface = Color(0xFF121212)) else lightColorScheme(primary = Color(0xFF1B5E20), secondaryContainer = Color(0xFFE8F5E9))
+    MaterialTheme(colorScheme = colors) {
+        if (isLocked) { AppLockGateScreen(vm.appLockManager) { vm.unlockApp() }; return@MaterialTheme }
+        if (activeScanner != ActiveScanner.NONE) {
             OfflineQrScannerScreen(
-                title = when (activeScanner) {
-                    ActiveScanner.BUYER_SCAN_SHOP -> "Scan Shop Board QR"
-                    ActiveScanner.BUYER_SCAN_RECEIPT -> "Scan Receipt QR"
-                    ActiveScanner.SELLER_SCAN_CART -> "Scan Buyer Cart QR"
-                    ActiveScanner.NONE -> ""
-                },
-                onQrComplete = { qrText ->
-                    val mode = activeScanner
-                    activeScanner = ActiveScanner.NONE
-                    when (mode) {
-                        ActiveScanner.BUYER_SCAN_SHOP -> {
-                            vm.handleScannedShopBoardQr(qrText)
-                            selectedTab = 1
-                        }
-                        ActiveScanner.BUYER_SCAN_RECEIPT -> vm.handleScannedReceiptQr(qrText)
-                        ActiveScanner.SELLER_SCAN_CART -> {
-                            vm.handleScannedBuyerCartQr(qrText)
-                            selectedTab = 1
-                        }
-                        ActiveScanner.NONE -> Unit
+                title = when (activeScanner) { ActiveScanner.BUYER_SCAN_SHOP -> "Scan Shop QR"; ActiveScanner.BUYER_SCAN_RECEIPT -> "Scan Receipt QR"; else -> "Scan Cart QR" },
+                onQrComplete = { qr ->
+                    val m = activeScanner; activeScanner = ActiveScanner.NONE
+                    when (m) {
+                        ActiveScanner.BUYER_SCAN_SHOP -> { vm.handleScannedShopBoardQr(qr); selectedTab = 1 }
+                        ActiveScanner.BUYER_SCAN_RECEIPT -> vm.handleScannedReceiptQr(qr)
+                        ActiveScanner.SELLER_SCAN_CART -> { vm.handleScannedBuyerCartQr(qr); selectedTab = 1 }
+                        else -> Unit
                     }
                 },
                 onCancel = { activeScanner = ActiveScanner.NONE }
             )
             return@MaterialTheme
         }
-
-        val snackbarHostState = remember { SnackbarHostState() }
-        LaunchedEffect(statusMsg) {
-            statusMsg?.let {
-                snackbarHostState.showSnackbar(it)
-                vm.clearStatusMessage()
-            }
-        }
-
+        val snack = remember { SnackbarHostState() }
+        LaunchedEffect(statusMsg) { statusMsg?.let { snack.showSnackbar(it); vm.clearStatusMessage() } }
         Scaffold(
-            snackbarHost = { SnackbarHost(snackbarHostState) },
+            snackbarHost = { SnackbarHost(snack) },
             topBar = {
                 TopAppBar(
-                    title = {
-                        Column {
-                            Text("636mecheri", fontWeight = FontWeight.Bold, style = MaterialTheme.typography.titleMedium)
-                            Text(
-                                if (role == UserRole.SELLER) "Seller Mode / விற்பனையாளர்" else "Buyer Mode / வாங்குபவர்",
-                                style = MaterialTheme.typography.labelSmall
-                            )
-                        }
-                    },
-                    actions = {
-                        FilledTonalButton(
-                            onClick = { vm.toggleRole() },
-                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp)
-                        ) {
-                            Icon(Icons.Default.SwapHoriz, contentDescription = null, modifier = Modifier.size(16.dp))
-                            Spacer(Modifier.width(4.dp))
-                            Text(if (role == UserRole.SELLER) "→ Buyer" else "→ Seller")
-                        }
-                    }
+                    title = { Column { Text("636mecheri", fontWeight = FontWeight.Bold, style = MaterialTheme.typography.titleMedium); Text(if (role == UserRole.SELLER) "Seller Mode / விற்பனையாளர்" else "Buyer Mode / வாங்குபவர்", style = MaterialTheme.typography.labelSmall) } },
+                    actions = { FilledTonalButton(onClick = { vm.toggleRole() }, contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp)) { Icon(Icons.Default.SwapHoriz, null, Modifier.size(16.dp)); Spacer(Modifier.width(4.dp)); Text(if (role == UserRole.SELLER) "→ Buyer" else "→ Seller") } }
                 )
             },
             bottomBar = {
                 NavigationBar {
                     if (role == UserRole.SELLER) {
-                        NavigationBarItem(selected = selectedTab == 0, onClick = { selectedTab = 0 }, icon = { Icon(Icons.Default.Storefront, null) }, label = { Text("Catalog") })
-                        NavigationBarItem(selected = selectedTab == 1, onClick = { selectedTab = 1 }, icon = { Icon(Icons.Default.QrCode, null) }, label = { Text("Shop QR") })
-                        NavigationBarItem(selected = selectedTab == 2, onClick = { selectedTab = 2 }, icon = { Icon(Icons.Default.Assessment, null) }, label = { Text("Profit") })
-                        NavigationBarItem(selected = selectedTab == 3, onClick = { selectedTab = 3 }, icon = { Icon(Icons.Default.VerifiedUser, null) }, label = { Text("0% Net") })
+                        NavigationBarItem(selectedTab == 0, { selectedTab = 0 }, { Icon(Icons.Default.Storefront, null) }, label = { Text("Catalog") })
+                        NavigationBarItem(selectedTab == 1, { selectedTab = 1 }, { Icon(Icons.Default.QrCode, null) }, label = { Text("Shop QR") })
+                        NavigationBarItem(selectedTab == 2, { selectedTab = 2 }, { Icon(Icons.Default.Assessment, null) }, label = { Text("Profit") })
+                        NavigationBarItem(selectedTab == 3, { selectedTab = 3 }, { Icon(Icons.Default.VerifiedUser, null) }, label = { Text("0% Net") })
                     } else {
-                        NavigationBarItem(selected = selectedTab == 0, onClick = { selectedTab = 0 }, icon = { Icon(Icons.Default.Store, null) }, label = { Text("Shops") })
-                        NavigationBarItem(selected = selectedTab == 1, onClick = { selectedTab = 1 }, icon = { Icon(Icons.Default.ViewList, null) }, label = { Text("Browse") })
-                        NavigationBarItem(selected = selectedTab == 2, onClick = { selectedTab = 2 }, icon = { Icon(Icons.Default.ShoppingCart, null) }, label = { Text("Cart (${buyerCart.size})") })
-                        NavigationBarItem(selected = selectedTab == 3, onClick = { selectedTab = 3 }, icon = { Icon(Icons.Default.VerifiedUser, null) }, label = { Text("0% Net") })
+                        NavigationBarItem(selectedTab == 0, { selectedTab = 0 }, { Icon(Icons.Default.Store, null) }, label = { Text("Shops") })
+                        NavigationBarItem(selectedTab == 1, { selectedTab = 1 }, { Icon(Icons.Default.ViewList, null) }, label = { Text("Browse") })
+                        NavigationBarItem(selectedTab == 2, { selectedTab = 2 }, { Icon(Icons.Default.ShoppingCart, null) }, label = { Text("Cart (${buyerCart.size})") })
+                        NavigationBarItem(selectedTab == 3, { selectedTab = 3 }, { Icon(Icons.Default.VerifiedUser, null) }, label = { Text("0% Net") })
                     }
                 }
             }
-        ) { padding ->
-            Box(modifier = Modifier.fillMaxSize().padding(padding)) {
+        ) { pad ->
+            Box(Modifier.fillMaxSize().padding(pad)) {
                 if (selectedTab == 3) {
-                    TrustVerifierScreen(
-                        report = auditReport,
-                        onReRunAudit = { vm.refreshOfflineAudit() },
-                        lockManager = vm.appLockManager,
-                        onLockNow = { vm.checkAppLock() }
-                    )
+                    TrustVerifierScreen(auditReport, { vm.refreshOfflineAudit() }, vm.appLockManager, { vm.checkAppLock() })
                 } else if (role == UserRole.SELLER) {
-                    val profile = sellerProfile
-                    if (profile == null) {
-                        SellerShopSetupCard(existing = null, onSave = { n, a -> vm.createOrUpdateShop(n, a) })
-                    } else if (packingSummary != null) {
-                        SellerCounterPackingScreen(
-                            summary = packingSummary!!,
-                            receiptQr = lastReceiptQr,
-                            onConfirmPacked = { vm.confirmCounterOrderPacked() },
-                            onDone = { vm.clearPackingSession() }
-                        )
-                    } else {
-                        when (selectedTab) {
-                            0 -> Column(modifier = Modifier.fillMaxSize()) {
-                                CatalogToolbar(
-                                    role = UserRole.SELLER,
-                                    filter = filter,
-                                    onUpdateFilter = vm::updateFilter,
-                                    onOpenSortSheet = { showSortDialog = true },
-                                    onOpenFilterSheet = { showFilterDialog = true },
-                                    onOpenCustomizeDialog = { showCustomizeDialog = true }
-                                )
-                                val visibleItems = remember(rawSellerItems, filter) {
-                                    CatalogFilterEngine.apply(rawSellerItems, UserRole.SELLER, filter)
-                                }
-                                MultiViewCatalogBrowser(
-                                    items = visibleItems,
-                                    role = UserRole.SELLER,
-                                    filter = filter,
-                                    customization = customization,
-                                    onSellerToggleEnable = { id, en -> vm.setSellerItemEnabled(id, en) },
-                                    onSellerBulkCategory = { c, en -> vm.setCategoryEnabledForSeller(c, en) },
-                                    onSellerEditItem = { editingSellerItem = it },
-                                    onBuyerSetQty = { _, _, _ -> },
-                                    onBuyerHideItem = {}
-                                )
-                            }
-                            1 -> SellerLiveBoardQrScreen(
-                                shopName = profile.shopName,
-                                shopId = profile.shopId,
-                                frames = remember(rawSellerItems, profile) { vm.buildSellerShopBoardQrFrames() },
-                                onOpenCartScanner = { activeScanner = ActiveScanner.SELLER_SCAN_CART }
-                            )
-                            2 -> SellerBusinessOpsScreen(
-                                profit = profitReport,
-                                enabledItems = remember(rawSellerItems) { rawSellerItems.filter { it.isEnabledInShop } },
-                                onAddExpense = { t, a, n -> vm.recordExpense(t, a, n) },
-                                onAddWaste = { id, q, l, r -> vm.recordWaste(id, q, l, r) },
-                                onAddStockInward = { id, q, c, n -> vm.recordStockInward(id, q, c, n) }
-                            )
+                    val prof = sellerProfile
+                    if (prof == null) SellerShopSetupCard(null) { n, a, u, p -> vm.createOrUpdateShop(n, a, u, p) }
+                    else if (packingSummary != null) SellerCounterPackingScreen(packingSummary!!, lastReceiptQr, { amt, note -> vm.buildDynamicUpiQrForOrder(amt, note) }, { col, mode, c, u, rsn, utr -> vm.confirmCounterOrderPacked(col, mode, c, u, rsn, utr) }, { vm.clearPackingSession() })
+                    else when (selectedTab) {
+                        0 -> Column(Modifier.fillMaxSize()) {
+                            CatalogToolbar(UserRole.SELLER, filter, vm::updateFilter, { showSort = true }, { showFilter = true }, { showCustom = true })
+                            val vis = remember(rawSellerItems, filter) { CatalogFilterEngine.apply(rawSellerItems, UserRole.SELLER, filter) }
+                            MultiViewCatalogBrowser(vis, UserRole.SELLER, filter, customization, { id, en -> vm.setSellerItemEnabled(id, en) }, { c, en -> vm.setCategoryEnabledForSeller(c, en) }, { editItem = it }, { _, _, _ -> }, {})
                         }
+                        1 -> SellerLiveBoardQrScreen(prof, remember(rawSellerItems, prof) { vm.buildSellerShopBoardQrFrames() }, { v, p -> vm.updateShopUpi(v, p) }, { activeScanner = ActiveScanner.SELLER_SCAN_CART })
+                        2 -> SellerBusinessOpsScreen(profitReport, remember(rawSellerItems) { rawSellerItems.filter { it.isEnabledInShop } }, { t, a, n -> vm.recordExpense(t, a, n) }, { id, q, l, r -> vm.recordWaste(id, q, l, r) }, { id, q, c, n -> vm.recordStockInward(id, q, c, n) })
                     }
                 } else {
                     when (selectedTab) {
-                        0 -> BuyerSavedShopsScreen(
-                            shops = savedShops,
-                            selectedShopId = selectedShopId,
-                            onSelectShop = { id -> vm.selectBuyerShop(id); selectedTab = 1 },
-                            onScanNewShopQr = { activeScanner = ActiveScanner.BUYER_SCAN_SHOP }
-                        )
-                        1 -> Column(modifier = Modifier.fillMaxSize()) {
-                            CatalogToolbar(
-                                role = UserRole.BUYER,
-                                filter = filter,
-                                onUpdateFilter = vm::updateFilter,
-                                onOpenSortSheet = { showSortDialog = true },
-                                onOpenFilterSheet = { showFilterDialog = true },
-                                onOpenCustomizeDialog = { showCustomizeDialog = true }
-                            )
-                            val visibleBuyerItems = remember(rawBuyerItems, filter) {
-                                CatalogFilterEngine.apply(rawBuyerItems, UserRole.BUYER, filter)
-                            }
-                            MultiViewCatalogBrowser(
-                                items = visibleBuyerItems,
-                                role = UserRole.BUYER,
-                                filter = filter,
-                                customization = customization,
-                                onSellerToggleEnable = { _, _ -> },
-                                onSellerBulkCategory = { _, _ -> },
-                                onSellerEditItem = {},
-                                onBuyerSetQty = { id, m, p -> vm.setBuyerCartQuantity(id, m, p) },
-                                onBuyerHideItem = { id -> vm.toggleBuyerHiddenProduct(id, true) }
-                            )
+                        0 -> BuyerSavedShopsScreen(savedShops, selectedShopId, { id -> vm.selectBuyerShop(id); selectedTab = 1 }, { activeScanner = ActiveScanner.BUYER_SCAN_SHOP })
+                        1 -> Column(Modifier.fillMaxSize()) {
+                            CatalogToolbar(UserRole.BUYER, filter, vm::updateFilter, { showSort = true }, { showFilter = true }, { showCustom = true })
+                            val vis = remember(rawBuyerItems, filter) { CatalogFilterEngine.apply(rawBuyerItems, UserRole.BUYER, filter) }
+                            MultiViewCatalogBrowser(vis, UserRole.BUYER, filter, customization, { _, _ -> }, { _, _ -> }, {}, { id, m, p -> vm.setBuyerCartQuantity(id, m, p) }, { id -> vm.toggleBuyerHiddenProduct(id, true) })
                         }
-                        2 -> {
-                            val activeShopName = savedShops.firstOrNull { it.shopId == selectedShopId }?.shopName ?: "Selected Shop"
-                            val catalogMap = remember(rawBuyerItems) { rawBuyerItems.associateBy { it.productId } }
-                            BuyerCartAndQrScreen(
-                                shopName = activeShopName,
-                                cartItems = buyerCart,
-                                catalogMap = catalogMap,
-                                cartQrPayload = remember(buyerCart, selectedShopId) { vm.buildBuyerCartQr() },
-                                receipts = buyerReceipts,
-                                onClearCart = { vm.clearActiveBuyerCart() },
-                                onScanReceiptQr = { activeScanner = ActiveScanner.BUYER_SCAN_RECEIPT }
-                            )
-                        }
+                        2 -> BuyerCartAndQrScreen(savedShops.firstOrNull { it.shopId == selectedShopId }?.shopName ?: "Selected Shop", buyerCart, remember(rawBuyerItems) { rawBuyerItems.associateBy { it.productId } }, remember(buyerCart, selectedShopId) { vm.buildBuyerCartQr() }, buyerReceipts, { vm.clearActiveBuyerCart() }, { activeScanner = ActiveScanner.BUYER_SCAN_RECEIPT })
                     }
                 }
             }
         }
-
-        if (showSortDialog) {
-            SortDialog(
-                current = filter.sortOption,
-                onSelect = { opt -> vm.updateFilter { it.copy(sortOption = opt) } },
-                onDismiss = { showSortDialog = false }
-            )
-        }
-        if (showFilterDialog) {
-            FilterDialog(
-                filter = filter,
-                onApply = { updated -> vm.updateFilter { updated } },
-                onDismiss = { showFilterDialog = false }
-            )
-        }
-        if (showCustomizeDialog) {
-            VisualCustomizationDialog(
-                current = customization,
-                onUpdate = vm::updateCustomization,
-                onDismiss = { showCustomizeDialog = false }
-            )
-        }
-        editingSellerItem?.let { item ->
-            SellerEditItemDialog(
-                item = item,
-                onSave = { pr, co, gr, st, qty ->
-                    vm.updateSellerItemDetails(item.productId, pr, co, gr, st, qty)
-                },
-                onDismiss = { editingSellerItem = null }
-            )
-        }
+        if (showSort) SortDialog(filter.sortOption, { o -> vm.updateFilter { it.copy(sortOption = o) } }, { showSort = false })
+        if (showFilter) FilterDialog(filter, { u -> vm.updateFilter { u } }, { showFilter = false })
+        if (showCustom) VisualCustomizationDialog(customization, vm::updateCustomization, { showCustom = false })
+        editItem?.let { it -> SellerEditItemDialog(it, { pr, co, gr, st, qty, bMin, bPr, vTag -> vm.updateSellerItemFull(it.productId, pr, co, gr, st, qty, bMin, bPr, vTag) }, { editItem = null }) }
     }
 }
