@@ -38,6 +38,11 @@ class MainActivity : ComponentActivity() {
         else window.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
     }
 
+    private fun applyKeepScreenOn(keep: Boolean) {
+        if (keep) window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        else window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         val m = AppLockManager(this).also { lockMgr = it }
@@ -49,7 +54,8 @@ class MainActivity : ComponentActivity() {
                 volumeKeyStepEnabled = volumeKeyStepEnabled.value,
                 onToggleVolumeKeyStep = { volumeKeyStepEnabled.value = it },
                 volumeStepEvent = volumeStepEvent.value,
-                onApplyFlagSecure = ::applyFlagSecure
+                onApplyFlagSecure = ::applyFlagSecure,
+                onApplyKeepScreenOn = ::applyKeepScreenOn
             )
         }
     }
@@ -85,13 +91,18 @@ class MainActivity : ComponentActivity() {
 fun MecheriRootApp(
     vm: MecheriViewModel, bgTick: Int, volumeKeyStepEnabled: Boolean,
     onToggleVolumeKeyStep: (Boolean) -> Unit, volumeStepEvent: Pair<Int, Int>,
-    onApplyFlagSecure: (Boolean) -> Unit
+    onApplyFlagSecure: (Boolean) -> Unit, onApplyKeepScreenOn: (Boolean) -> Unit
 ) {
     val role by vm.role.collectAsStateWithLifecycle()
     val customization by vm.customization.collectAsStateWithLifecycle()
     val filter by vm.filter.collectAsStateWithLifecycle()
     val sellerProfile by vm.sellerProfile.collectAsStateWithLifecycle()
     val rawSellerItems by vm.rawSellerCatalog.collectAsStateWithLifecycle()
+    val activePosSlot by vm.activePosSlot.collectAsStateWithLifecycle()
+    val allPosDrafts by vm.allPosDrafts.collectAsStateWithLifecycle()
+    val activePosDrafts by vm.activePosDrafts.collectAsStateWithLifecycle()
+    val eveningModeOn by vm.eveningModeOn.collectAsStateWithLifecycle()
+    val clockDriftDetected by vm.clockDriftDetected.collectAsStateWithLifecycle()
     val savedShops by vm.savedShops.collectAsStateWithLifecycle()
     val selectedShopId by vm.selectedBuyerShopId.collectAsStateWithLifecycle()
     val rawBuyerItems by vm.rawBuyerCatalog.collectAsStateWithLifecycle()
@@ -109,10 +120,15 @@ fun MecheriRootApp(
     val isLocked by vm.isLocked.collectAsStateWithLifecycle()
     var vaultUnlocked by remember { mutableStateOf(false) }
     var lockRefresh by remember { mutableStateOf(0) }
+    var posOpen by remember { mutableStateOf(false) }
     LaunchedEffect(Unit) { vm.checkAppLock() }
     LaunchedEffect(bgTick) { if (bgTick > 0) { vaultUnlocked = false; vm.checkAppLock() } }
     var selectedTab by remember(role) { mutableStateOf(0) }
     var activeScanner by remember { mutableStateOf(ActiveScanner.NONE) }
+    LaunchedEffect(activeScanner, posOpen, role, selectedTab) {
+        val keepOn = activeScanner != ActiveScanner.NONE || (role == UserRole.SELLER && (posOpen || selectedTab == 1))
+        onApplyKeepScreenOn(keepOn)
+    }
     var showSort by remember { mutableStateOf(false) }
     var showFilter by remember { mutableStateOf(false) }
     var showCustom by remember { mutableStateOf(false) }
@@ -125,16 +141,7 @@ fun MecheriRootApp(
         if (activeScanner != ActiveScanner.NONE) {
             OfflineQrScannerScreen(
                 title = when (activeScanner) { ActiveScanner.BUYER_SCAN_SHOP -> "Scan Shop QR"; ActiveScanner.BUYER_SCAN_RECEIPT -> "Scan Receipt QR"; ActiveScanner.SCAN_SOS -> "Scan SOS QR"; else -> "Scan Cart QR" },
-                onQrComplete = { qr ->
-                    val m = activeScanner; activeScanner = ActiveScanner.NONE
-                    when (m) {
-                        ActiveScanner.BUYER_SCAN_SHOP -> { vm.handleScannedShopBoardQr(qr); selectedTab = 1 }
-                        ActiveScanner.BUYER_SCAN_RECEIPT -> vm.handleScannedReceiptQr(qr)
-                        ActiveScanner.SELLER_SCAN_CART -> { vm.handleScannedBuyerCartQr(qr); selectedTab = 1 }
-                        ActiveScanner.SCAN_SOS -> vm.handleScannedSosQr(qr)
-                        else -> Unit
-                    }
-                },
+                onQrComplete = { qr -> val m = activeScanner; activeScanner = ActiveScanner.NONE; when (m) { ActiveScanner.BUYER_SCAN_SHOP -> { vm.handleScannedShopBoardQr(qr); selectedTab = 1 }; ActiveScanner.BUYER_SCAN_RECEIPT -> vm.handleScannedReceiptQr(qr); ActiveScanner.SELLER_SCAN_CART -> { vm.handleScannedBuyerCartQr(qr); selectedTab = 1 }; ActiveScanner.SCAN_SOS -> vm.handleScannedSosQr(qr); else -> Unit } },
                 onCancel = { activeScanner = ActiveScanner.NONE }
             )
             return@MaterialTheme
@@ -146,16 +153,22 @@ fun MecheriRootApp(
             topBar = {
                 TopAppBar(
                     title = { Column { Text("636mecheri", fontWeight = FontWeight.Bold, style = MaterialTheme.typography.titleMedium); Text(if (role == UserRole.SELLER) "Seller Mode / விற்பனையாளர்" else "Buyer Mode / வாங்குபவர்", style = MaterialTheme.typography.labelSmall) } },
-                    actions = { FilledTonalButton(onClick = { vm.toggleRole() }, contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp)) { Icon(Icons.Default.SwapHoriz, null, Modifier.size(16.dp)); Spacer(Modifier.width(4.dp)); Text(if (role == UserRole.SELLER) "→ Buyer" else "→ Seller") } }
+                    actions = {
+                        if (role == UserRole.SELLER && sellerProfile != null) {
+                            FilledTonalButton({ posOpen = !posOpen }, contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)) { Text(if (posOpen) "Catalog" else "⚡ POS") }
+                            Spacer(Modifier.width(4.dp))
+                        }
+                        FilledTonalButton(onClick = { posOpen = false; vm.toggleRole() }, contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp)) { Icon(Icons.Default.SwapHoriz, null, Modifier.size(16.dp)); Spacer(Modifier.width(4.dp)); Text(if (role == UserRole.SELLER) "→ Buyer" else "→ Seller") }
+                    }
                 )
             },
             bottomBar = {
                 NavigationBar {
                     if (role == UserRole.SELLER) {
-                        NavigationBarItem(selectedTab == 0, { selectedTab = 0 }, { Icon(Icons.Default.Storefront, null) }, label = { Text("Catalog") })
-                        NavigationBarItem(selectedTab == 1, { selectedTab = 1 }, { Icon(Icons.Default.QrCode, null) }, label = { Text("Shop QR") })
-                        NavigationBarItem(selectedTab == 2, { selectedTab = 2 }, { Icon(Icons.Default.Assessment, null) }, label = { Text("Profit") })
-                        NavigationBarItem(selectedTab == 3, { selectedTab = 3 }, { Icon(Icons.Default.VerifiedUser, null) }, label = { Text("0% Net") })
+                        NavigationBarItem(selectedTab == 0 && !posOpen, { posOpen = false; selectedTab = 0 }, { Icon(Icons.Default.Storefront, null) }, label = { Text("Catalog") })
+                        NavigationBarItem(selectedTab == 1 && !posOpen, { posOpen = false; selectedTab = 1 }, { Icon(Icons.Default.QrCode, null) }, label = { Text("Shop QR") })
+                        NavigationBarItem(selectedTab == 2 && !posOpen, { posOpen = false; selectedTab = 2 }, { Icon(Icons.Default.Assessment, null) }, label = { Text("Profit") })
+                        NavigationBarItem(selectedTab == 3 && !posOpen, { posOpen = false; selectedTab = 3 }, { Icon(Icons.Default.VerifiedUser, null) }, label = { Text("0% Net") })
                     } else {
                         NavigationBarItem(selectedTab == 0, { selectedTab = 0 }, { Icon(Icons.Default.Store, null) }, label = { Text("Shops") })
                         NavigationBarItem(selectedTab == 1, { selectedTab = 1 }, { Icon(Icons.Default.ViewList, null) }, label = { Text("Browse") })
@@ -166,6 +179,7 @@ fun MecheriRootApp(
             }
         ) { pad ->
             Box(Modifier.fillMaxSize().padding(pad)) {
+                val slotCounts = remember(allPosDrafts) { allPosDrafts.groupingBy { it.slotId }.eachCount() }
                 if (selectedTab == 3) {
                     if (scopedLock) AppLockGateScreen(vm.appLockManager) { vm.unlockApp(); vaultUnlocked = true }
                     else TrustVerifierScreen(auditReport, { vm.refreshOfflineAudit() }, vm.appLockManager, { vaultUnlocked = false; lockRefresh += 1; vm.checkAppLock() }, { on -> lockRefresh += 1; onApplyFlagSecure(vm.appLockManager.isLockEnabled() && on) })
@@ -173,6 +187,7 @@ fun MecheriRootApp(
                     val prof = sellerProfile
                     if (prof == null) SellerShopSetupCard(null) { n, a, u, p -> vm.createOrUpdateShop(n, a, u, p) }
                     else if (packingSummary != null) SellerCounterPackingScreen(packingSummary!!, lastReceiptQr, { amt, note -> vm.buildDynamicUpiQrForOrder(amt, note) }, { col, mode, c, u, rsn, utr -> vm.confirmCounterOrderPacked(col, mode, c, u, rsn, utr) }, { vm.clearPackingSession() })
+                    else if (posOpen) SellerSpeedPosScreen(prof.shopName, activePosSlot, slotCounts, activePosDrafts, rawSellerCatalog, udhaarList, eveningModeOn, clockDriftDetected, vm::selectPosSlot, vm::toggleEveningMode, { pId, qM, ovP -> vm.addOrUpdatePosItem(activePosSlot, pId, qM, ovP) }, { lbl, amtP -> vm.addPosMiscItem(activePosSlot, lbl, amtP) }, vm::removePosDraftRow, vm::clearPosDraftSlot, { al, ar, cb -> vm.addUdhaarCustomerImmediate(al, ar, cb) }, { amt, note -> vm.buildDynamicUpiQrForOrder(amt, note) }, vm::completePosCheckout, { posOpen = false })
                     else when (selectedTab) {
                         0 -> Column(Modifier.fillMaxSize()) {
                             CatalogToolbar(UserRole.SELLER, filter, vm::updateFilter, { showSort = true }, { showFilter = true }, { showCustom = true })

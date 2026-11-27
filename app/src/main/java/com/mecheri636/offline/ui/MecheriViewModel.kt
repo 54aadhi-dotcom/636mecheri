@@ -43,18 +43,24 @@ class MecheriViewModel(application: Application) : AndroidViewModel(application)
     val auditReport = _auditReport.asStateFlow()
     private val _isLocked = MutableStateFlow(false)
     val isLocked = _isLocked.asStateFlow()
+    private val _activePosSlot = MutableStateFlow("1")
+    val activePosSlot = _activePosSlot.asStateFlow()
+    private val _eveningModeOn = MutableStateFlow(loadEveningMode())
+    val eveningModeOn = _eveningModeOn.asStateFlow()
+    private val _clockDriftDetected = MutableStateFlow(false)
+    val clockDriftDetected = _clockDriftDetected.asStateFlow()
     private val st = SharingStarted.WhileSubscribed(5000)
     val sellerProfile = dao.observeSellerProfile().stateIn(viewModelScope, st, null)
     val buyerProfile = dao.observeBuyerProfile().stateIn(viewModelScope, st, null)
     val rawSellerCatalog = dao.observeSellerCatalog().stateIn(viewModelScope, st, emptyList())
+    val allPosDrafts = dao.observeAllPosDrafts().stateIn(viewModelScope, st, emptyList())
+    val activePosDrafts = _activePosSlot.flatMapLatest { slot -> dao.observePosDraftsForSlot(slot) }.stateIn(viewModelScope, st, emptyList())
     val savedShops = dao.observeBuyerSavedShops().stateIn(viewModelScope, st, emptyList())
     val buyerHiddenIds = dao.observeBuyerHiddenIds().map { it.toSet() }.stateIn(viewModelScope, st, emptySet())
     val rawBuyerCatalog = combine(_selectedBuyerShopId, _filter.map { it.buyerHidePersonalHidden }.distinctUntilChanged()) { s, h -> s to h }
         .flatMapLatest { (s, h) -> if (s == null) flowOf(emptyList()) else dao.observeBuyerShopCatalog(s, h) }
         .stateIn(viewModelScope, st, emptyList())
-    val activeBuyerCart = _selectedBuyerShopId.flatMapLatest { s ->
-        if (s == null) flowOf(emptyList()) else dao.observeCartForShop(s)
-    }.stateIn(viewModelScope, st, emptyList())
+    val activeBuyerCart = _selectedBuyerShopId.flatMapLatest { s -> if (s == null) flowOf(emptyList()) else dao.observeCartForShop(s) }.stateIn(viewModelScope, st, emptyList())
     val recentOrders = dao.observeRecentOrders().stateIn(viewModelScope, st, emptyList())
     val recentExpenses = dao.observeRecentExpenses().stateIn(viewModelScope, st, emptyList())
     val recentWaste = dao.observeRecentWaste().stateIn(viewModelScope, st, emptyList())
@@ -62,9 +68,7 @@ class MecheriViewModel(application: Application) : AndroidViewModel(application)
     val customerUdhaar = dao.observeCustomerUdhaar().stateIn(viewModelScope, st, emptyList())
     val cashZReports = dao.observeCashZReports().stateIn(viewModelScope, st, emptyList())
     val auditLogs = dao.observeAuditLogs().stateIn(viewModelScope, st, emptyList())
-    val profitReport = combine(recentOrders, recentExpenses, recentWaste) { o, e, w ->
-        SellerOperationsEngine.computeFullReport(o, e, w)
-    }.stateIn(viewModelScope, st, DailyProfitReport(0, 0, 0, 0, 0, 0))
+    val profitReport = combine(recentOrders, recentExpenses, recentWaste) { o, e, w -> SellerOperationsEngine.computeFullReport(o, e, w) }.stateIn(viewModelScope, st, DailyProfitReport(0, 0, 0, 0, 0, 0))
 
     init {
         viewModelScope.launch {
@@ -76,8 +80,21 @@ class MecheriViewModel(application: Application) : AndroidViewModel(application)
             }
             dao.insertDefaultBuyerProfileIfMissing(System.currentTimeMillis())
             dao.initializeAllHiddenForSeller()
+            checkClockDrift()
             refreshOfflineAudit()
         }
+    }
+    private fun todayDayKey(): String = SimpleDateFormat("yyyyMMdd", Locale.US).format(Date())
+    private fun loadEveningMode(): Boolean = prefs.getString("evening_day", "") == todayDayKey() && prefs.getBoolean("evening_on", false)
+    fun toggleEveningMode() {
+        val next = !_eveningModeOn.value
+        _eveningModeOn.value = next
+        prefs.edit().putString("evening_day", todayDayKey()).putBoolean("evening_on", next).apply()
+    }
+    fun selectPosSlot(slotId: String) { if (slotId in setOf("1", "2", "3")) _activePosSlot.value = slotId }
+    private fun checkClockDrift() {
+        val lastMs = prefs.getLong("last_order_epoch_ms", 0L)
+        _clockDriftDetected.value = lastMs > 0L && System.currentTimeMillis() < lastMs
     }
     fun switchRole(newRole: UserRole) { _role.value = newRole; prefs.edit().putString("role", newRole.name).apply() }
     fun toggleRole() = switchRole(if (_role.value == UserRole.SELLER) UserRole.BUYER else UserRole.SELLER)
@@ -85,8 +102,7 @@ class MecheriViewModel(application: Application) : AndroidViewModel(application)
     fun clearStatusMessage() { _statusMessage.value = null }
     fun updateCustomization(t: (VisualCustomization) -> VisualCustomization) {
         val u = t(_customization.value); _customization.value = u
-        prefs.edit().putString("lang", u.language.name).putString("theme", u.themeMode.name)
-            .putString("density", u.iconDensity.name).putString("expand", u.expandStyle.name).apply()
+        prefs.edit().putString("lang", u.language.name).putString("theme", u.themeMode.name).putString("density", u.iconDensity.name).putString("expand", u.expandStyle.name).apply()
     }
     private fun loadCustomization() = VisualCustomization(
         runCatching { AppLanguage.valueOf(prefs.getString("lang", "BILINGUAL")!!) }.getOrDefault(AppLanguage.BILINGUAL),
@@ -101,241 +117,130 @@ class MecheriViewModel(application: Application) : AndroidViewModel(application)
             val sid = ex?.shopId ?: "MCH${Random.nextInt(1000, 9999)}"
             val vpa = upiVpa.trim().ifBlank { ex?.upiVpa.orEmpty() }
             val pay = upiPayeeName.trim().ifBlank { ex?.upiPayeeName.orEmpty().ifBlank { name } }
-            dao.saveSellerProfile(
-                SellerProfileEntity(
-                    id = 1,
-                    shopId = sid,
-                    shopName = name,
-                    shopArea = area.ifBlank { "Mecheri" },
-                    pinHash = ex?.pinHash,
-                    createdAt = ex?.createdAt ?: System.currentTimeMillis(),
-                    upiVpa = vpa,
-                    upiPayeeName = pay,
-                    upiStaticRaw = ex?.upiStaticRaw.orEmpty(),
-                    strictStockMode = ex?.strictStockMode ?: false,
-                    shopType = ex?.shopType ?: "PRODUCE",
-                    openingCashFloatPaise = ex?.openingCashFloatPaise ?: 0L,
-                    lastOrderSeq = ex?.lastOrderSeq ?: 0,
-                    lastBackupEpochMs = ex?.lastBackupEpochMs ?: 0L
-                )
-            )
+            dao.saveSellerProfile(SellerProfileEntity(1, sid, name, area.ifBlank { "Mecheri" }, ex?.pinHash, ex?.createdAt ?: System.currentTimeMillis(), vpa, pay, ex?.upiStaticRaw.orEmpty(), ex?.strictStockMode ?: false, ex?.shopType ?: "PRODUCE", ex?.openingCashFloatPaise ?: 0L, ex?.lastOrderSeq ?: 0, ex?.lastBackupEpochMs ?: 0L))
             dao.initializeAllHiddenForSeller()
             _statusMessage.value = "Shop '$name' saved."
         }
     }
+    fun addOrUpdatePosItem(slotId: String, productId: Int, qtyMilli: Long, overrideLineTotalPaise: Long?) = viewModelScope.launch {
+        if (qtyMilli <= 0L && overrideLineTotalPaise == null) return@launch
+        val prod = rawSellerCatalog.value.firstOrNull { it.productId == productId } ?: return@launch
+        dao.upsertPosDraft(PosDraftEntity(slotId = slotId, productId = productId, customLabel = "", qtyMilli = qtyMilli, unitPricePaise = prod.pricePaise, overrideLineTotalPaise = overrideLineTotalPaise, updatedAt = System.currentTimeMillis()))
+    }
+    fun addPosMiscItem(slotId: String, label: String, amountPaise: Long) = viewModelScope.launch {
+        if (amountPaise <= 0L) return@launch
+        dao.upsertPosDraft(PosDraftEntity(slotId = slotId, productId = 0, customLabel = label.take(24), qtyMilli = 1000L, unitPricePaise = amountPaise, overrideLineTotalPaise = amountPaise, updatedAt = System.currentTimeMillis()))
+    }
+    fun removePosDraftRow(id: Long) = viewModelScope.launch { dao.deletePosDraftById(id) }
+    fun clearPosDraftSlot(slotId: String) = viewModelScope.launch { dao.clearPosDraftSlot(slotId) }
+    fun addUdhaarCustomerImmediate(alias: String, area: String, onCreated: (Long) -> Unit) = viewModelScope.launch {
+        val clean = alias.trim(); if (clean.isBlank()) return@launch
+        val id = dao.upsertCustomerUdhaar(CustomerUdhaarEntity(alias = clean, areaNote = area.trim(), balancePaise = 0L, riskTag = "NORMAL", updatedAt = System.currentTimeMillis()))
+        onCreated(id)
+    }
+    fun completePosCheckout(slotId: String, payMode: String, cashPaise: Long, upiPaise: Long, customerId: Long, utrLast4: String, eveningActive: Boolean) = viewModelScope.launch {
+        val prof = sellerProfile.value ?: return@launch
+        val rows = dao.getPosDraftsForSlotOnce(slotId)
+        if (rows.isEmpty()) return@launch
+        val now = System.currentTimeMillis()
+        if (now > prefs.getLong("last_order_epoch_ms", 0L)) prefs.edit().putLong("last_order_epoch_ms", now).apply()
+        val catMap = rawSellerCatalog.value.associateBy { it.productId }
+        val lineItems = rows.mapNotNull { r ->
+            val rawLine = r.overrideLineTotalPaise ?: SellerOperationsEngine.computeLinePaise(r.qtyMilli, r.unitPricePaise)
+            val isPerish = r.productId > 0 && eveningActive && (catMap[r.productId]?.isPerishable == true) && r.overrideLineTotalPaise == null
+            val lineTotal = if (isPerish) ((rawLine * 80L) + 50L) / 100L else rawLine
+            if (lineTotal <= 0L && r.qtyMilli <= 0L) null
+            else {
+                val cogs = if (r.productId > 0) SellerOperationsEngine.computeLinePaise(r.qtyMilli, catMap[r.productId]?.costPricePaise ?: 0L) else 0L
+                SellerOrderItemEntity(0L, 0L, r.productId.coerceAtLeast(1), r.qtyMilli, r.unitPricePaise, lineTotal, r.customLabel.ifBlank { catMap[r.productId]?.nameEn ?: "Misc" }, cogs, false, 0L)
+            }
+        }
+        if (lineItems.isEmpty()) return@launch
+        val totalP = lineItems.sumOf { it.lineTotalPaise }
+        val cogsP = lineItems.sumOf { it.unitCogsPaise }
+        val nextSeq = maxOf(prof.lastOrderSeq, dao.getTotalOrderCount()) + 1
+        val code = "ORD%04d".format(nextSeq)
+        val collP = when (payMode) { "UDHAAR" -> 0L; "SPLIT" -> cashPaise + upiPaise; else -> totalP }
+        val order = SellerOrderEntity(receiptCode = code, buyerAlias = if (customerId > 0L) "UDH#$customerId" else "WALKIN", totalPaise = totalP, cogsPaise = cogsP, itemCount = lineItems.size, createdAt = now, originalTotalPaise = totalP, collectedPaise = collP, cashPaise = if (payMode == "CASH") totalP else cashPaise, upiPaise = if (payMode == "UPI") totalP else upiPaise, variancePaise = (totalP - collP).coerceAtLeast(0L), varianceReason = if (payMode == "UDHAAR") "UDHAAR_DUE" else "EXACT", paymentStatus = if (payMode == "UDHAAR") "PENDING_PAYMENT" else "PAID", paymentMode = payMode, utrNote = utrLast4, cartNonce = "POS_${slotId}_${now}", orderStatus = "COMPLETED", utrLast4 = utrLast4, customerId = customerId)
+        dao.commitSaleAtomically(order, lineItems, now)
+        dao.updateLastOrderSeq(nextSeq)
+        if (payMode == "UDHAAR" && customerId > 0L) {
+            val ex = customerUdhaar.value.firstOrNull { it.customerId == customerId }
+            if (ex != null) dao.upsertCustomerUdhaar(ex.copy(balancePaise = ex.balancePaise + totalP, updatedAt = now))
+        }
+        dao.clearPosDraftSlot(slotId)
+        PosSoundFeedback.beepPaid()
+        _statusMessage.value = "Bill $code saved (${CatalogFilterEngine.formatRs(totalP)})"
+    }
     fun updateShopUpi(upiVpa: String, payeeName: String) {
-        val ex = sellerProfile.value ?: return
-        val vpa = upiVpa.trim()
-        if (vpa.isNotBlank() && runCatching { QrFirewall.buildDynamicUpiQr(vpa, payeeName.ifBlank { ex.shopName }, 100L, "T") }.isFailure) {
-            _statusMessage.value = "Invalid UPI ID (e.g. name@bank)"; return
-        }
-        viewModelScope.launch {
-            val now = System.currentTimeMillis()
-            dao.saveSellerProfile(ex.copy(upiVpa = vpa, upiPayeeName = payeeName.trim().ifBlank { ex.shopName }))
-            dao.insertAuditLog(AuditLogEntity(actionType = "UPI_UPDATE", refId = ex.shopId, summary = vpa.ifBlank { "CLEARED" }, createdAt = now))
-            _statusMessage.value = if (vpa.isBlank()) "Shop UPI cleared." else "UPI saved: $vpa"
-        }
+        val ex = sellerProfile.value ?: return; val vpa = upiVpa.trim()
+        if (vpa.isNotBlank() && runCatching { QrFirewall.buildDynamicUpiQr(vpa, payeeName.ifBlank { ex.shopName }, 100L, "T") }.isFailure) { _statusMessage.value = "Invalid UPI ID (e.g. name@bank)"; return }
+        viewModelScope.launch { val now = System.currentTimeMillis(); dao.saveSellerProfile(ex.copy(upiVpa = vpa, upiPayeeName = payeeName.trim().ifBlank { ex.shopName })); dao.insertAuditLog(AuditLogEntity(actionType = "UPI_UPDATE", refId = ex.shopId, summary = vpa.ifBlank { "CLEARED" }, createdAt = now)); _statusMessage.value = if (vpa.isBlank()) "Shop UPI cleared." else "UPI saved: $vpa" }
     }
     fun setSellerItemEnabled(id: Int, en: Boolean) = viewModelScope.launch { dao.setSellerItemEnabled(id, en, System.currentTimeMillis()) }
     fun setCategoryEnabledForSeller(cat: String, en: Boolean) = viewModelScope.launch { dao.setCategoryEnabledForSeller(cat, en, System.currentTimeMillis()) }
-    fun updateSellerItemDetails(id: Int, pr: Double, co: Double, gr: String, st: Int, qty: Double) = updateSellerItemFull(id, pr, co, gr, st, qty)
     fun updateSellerItemFull(id: Int, pr: Double, co: Double, gr: String, st: Int, qty: Double, bMin: Double = 0.0, bPr: Double = 0.0, vTag: String = "") = viewModelScope.launch {
-        val now = System.currentTimeMillis()
-        dao.updateSellerItemFull(id, (pr * 100).roundToLong().coerceAtLeast(0L), (co * 100).roundToLong().coerceAtLeast(0L), gr, st, (qty * 1000).roundToLong().coerceAtLeast(0L), (bMin * 1000).roundToLong().coerceAtLeast(0L), (bPr * 100).roundToLong().coerceAtLeast(0L), 100L, 100L, vTag.trim().take(16), now)
-        dao.setSellerItemEnabled(id, true, now)
+        val now = System.currentTimeMillis(); dao.updateSellerItemFull(id, (pr * 100).roundToLong().coerceAtLeast(0L), (co * 100).roundToLong().coerceAtLeast(0L), gr, st, (qty * 1000).roundToLong().coerceAtLeast(0L), (bMin * 1000).roundToLong().coerceAtLeast(0L), (bPr * 100).roundToLong().coerceAtLeast(0L), 100L, 100L, vTag.trim().take(16), now); dao.setSellerItemEnabled(id, true, now)
     }
     fun buildSellerShopBoardQrFrames(): List<String> {
         val p = sellerProfile.value ?: return emptyList()
-        val quotes = rawSellerCatalog.value.filter { it.isEnabledInShop && it.pricePaise > 0L }.map {
-            QrCodec.SellerItemQuote(it.productId, it.pricePaise, it.qualityGrade, it.stockStatus.coerceIn(0, 2), it.stockQtyMilli, it.bulkMinQtyMilli, it.bulkPricePaise, it.minOrderMilli, it.stepQtyMilli, it.varietyTag)
-        }
+        val quotes = rawSellerCatalog.value.filter { it.isEnabledInShop && it.pricePaise > 0L }.map { QrCodec.SellerItemQuote(it.productId, it.pricePaise, it.qualityGrade, it.stockStatus.coerceIn(0, 2), it.stockQtyMilli, it.bulkMinQtyMilli, it.bulkPricePaise, it.minOrderMilli, it.stepQtyMilli, it.varietyTag) }
         return QrCodec.encodeSellerBoard(QrCodec.SellerBoardPayload(MasterCatalogSeeder.CURRENT_CATALOG_VERSION, p.shopId, p.shopName, System.currentTimeMillis() / 60000L, quotes, 0L, p.upiVpa))
     }
-    fun buildDynamicUpiQrForOrder(amtP: Long, note: String): String? {
-        val p = sellerProfile.value ?: return null
-        if (p.upiVpa.isBlank() || amtP <= 0L) return null
-        return runCatching { QrFirewall.buildDynamicUpiQr(p.upiVpa, p.upiPayeeName.ifBlank { p.shopName }, amtP, note) }.getOrNull()
-    }
+    fun buildDynamicUpiQrForOrder(amtP: Long, note: String): String? { val p = sellerProfile.value ?: return null; if (p.upiVpa.isBlank() || amtP <= 0L) return null; return runCatching { QrFirewall.buildDynamicUpiQr(p.upiVpa, p.upiPayeeName.ifBlank { p.shopName }, amtP, note) }.getOrNull() }
     fun handleScannedBuyerCartQr(qrText: String) = viewModelScope.launch {
-        try {
-            val p = sellerProfile.value ?: run { _statusMessage.value = "Create Shop Name first."; return@launch }
-            val cart = QrCodec.decodeBuyerCart(qrText)
-            activeCartNonce = cart.cartNonce
-            _packingSummary.value = SellerOperationsEngine.buildPackingChecklist(p.shopId, cart, dao.getAllMasterProducts().associateBy { it.productId }, dao.getAllSellerItems().associateBy { it.productId })
-            _lastReceiptQr.value = null
-        } catch (e: Exception) { _statusMessage.value = "Invalid Cart QR: ${e.message}" }
+        try { val p = sellerProfile.value ?: run { _statusMessage.value = "Create Shop Name first."; return@launch }; val cart = QrCodec.decodeBuyerCart(qrText); activeCartNonce = cart.cartNonce; _packingSummary.value = SellerOperationsEngine.buildPackingChecklist(p.shopId, cart, dao.getAllMasterProducts().associateBy { it.productId }, dao.getAllSellerItems().associateBy { it.productId }); _lastReceiptQr.value = null } catch (e: Exception) { _statusMessage.value = "Invalid Cart QR: ${e.message}" }
     }
     fun clearPackingSession() { _packingSummary.value = null; _lastReceiptQr.value = null; activeCartNonce = "" }
     fun confirmCounterOrderPacked(collectedRs: Double? = null, payMode: String = "CASH", cashRs: Double? = null, upiRs: Double? = null, varReason: String = "EXACT", utr: String = "") {
-        val sum = _packingSummary.value ?: return; val p = sellerProfile.value ?: return
-        if (sum.isWrongShop || sum.activeBillPaise <= 0L) return
+        val sum = _packingSummary.value ?: return; val p = sellerProfile.value ?: return; if (sum.isWrongShop || sum.activeBillPaise <= 0L) return
         viewModelScope.launch {
-            val now = System.currentTimeMillis()
-            val nextSeq = maxOf(p.lastOrderSeq, dao.getTotalOrderCount()) + 1
-            val code = "ORD%04d".format(nextSeq)
-            val lines = sum.lines.filter { it.status != LineStatus.SOLD_OUT_OR_HIDDEN && it.qtyMilli > 0L }
-            val orig = sum.activeBillPaise; var cashP = 0L; var upiP = 0L
+            val now = System.currentTimeMillis(); val nextSeq = maxOf(p.lastOrderSeq, dao.getTotalOrderCount()) + 1; val code = "ORD%04d".format(nextSeq)
+            val lines = sum.lines.filter { it.status != LineStatus.SOLD_OUT_OR_HIDDEN && it.qtyMilli > 0L }; val orig = sum.activeBillPaise; var cashP = 0L; var upiP = 0L
             var collP = collectedRs?.let { (it * 100.0).roundToLong().coerceAtLeast(0L) } ?: orig
-            when (payMode) {
-                "UPI" -> upiP = collP
-                "SPLIT" -> { cashP = ((cashRs ?: 0.0) * 100).roundToLong().coerceAtLeast(0L); upiP = ((upiRs ?: 0.0) * 100).roundToLong().coerceAtLeast(0L); if (cashP + upiP > 0L) collP = cashP + upiP else cashP = collP }
-                "UDHAAR" -> collP = 0L
-                else -> cashP = collP
-            }
-            val varP = orig - collP
-            val rsn = when { payMode == "UDHAAR" -> "UDHAAR_DUE"; varP == 0L -> "EXACT"; varP < 0L -> "OVERPAID"; varReason == "EXACT" -> "ROUND_OFF"; else -> varReason }
-            val pStat = when (rsn) { "UDHAAR_DUE" -> "PENDING_PAYMENT"; "FAKE_UPI" -> "UPI_PENDING"; else -> "PAID" }
-            val sMap = dao.getAllSellerItems().associateBy { it.productId }
+            when (payMode) { "UPI" -> upiP = collP; "SPLIT" -> { cashP = ((cashRs ?: 0.0) * 100).roundToLong().coerceAtLeast(0L); upiP = ((upiRs ?: 0.0) * 100).roundToLong().coerceAtLeast(0L); if (cashP + upiP > 0L) collP = cashP + upiP else cashP = collP }; "UDHAAR" -> collP = 0L; else -> cashP = collP }
+            val varP = orig - collP; val rsn = when { payMode == "UDHAAR" -> "UDHAAR_DUE"; varP == 0L -> "EXACT"; varP < 0L -> "OVERPAID"; varReason == "EXACT" -> "ROUND_OFF"; else -> varReason }
+            val pStat = when (rsn) { "UDHAAR_DUE" -> "PENDING_PAYMENT"; "FAKE_UPI" -> "UPI_PENDING"; else -> "PAID" }; val sMap = dao.getAllSellerItems().associateBy { it.productId }
             val ord = SellerOrderEntity(receiptCode = code, buyerAlias = sum.buyerAlias, totalPaise = orig, cogsPaise = sum.totalCogsPaise, itemCount = lines.size, createdAt = now, originalTotalPaise = orig, collectedPaise = collP, cashPaise = cashP, upiPaise = upiP, variancePaise = varP, varianceReason = rsn, paymentStatus = pStat, paymentMode = payMode, utrNote = utr.trim().take(40), cartNonce = activeCartNonce)
             val items = lines.map { SellerOrderItemEntity(0L, 0L, it.productId, it.qtyMilli, it.liveUnitPricePaise, it.lineTotalPaise, it.nameEn, sMap[it.productId]?.costPricePaise ?: 0L, it.isFreebie, 0L) }
             if (dao.commitSaleAtomically(ord, items, now) == -1L) { _statusMessage.value = "Duplicate Cart QR!"; return@launch }
-            dao.updateLastOrderSeq(nextSeq)
-            dao.insertAuditLog(AuditLogEntity(actionType = "SALE", refId = code, summary = "$payMode/$rsn", deltaPaise = collP, createdAt = now))
+            dao.updateLastOrderSeq(nextSeq); dao.insertAuditLog(AuditLogEntity(actionType = "SALE", refId = code, summary = "$payMode/$rsn", deltaPaise = collP, createdAt = now))
             _lastReceiptQr.value = QrCodec.encodeReceipt(QrCodec.ReceiptPayload(p.shopId, code, now / 60000L, orig, lines.map { QrCodec.ReceiptLine(it.productId, it.qtyMilli, it.liveUnitPricePaise) }, orig, collP, rsn, payMode))
             _statusMessage.value = "Order $code saved (${CatalogFilterEngine.formatRs(collP)})"
         }
     }
-    fun recordStockInward(id: Int, qty: Double, costRs: Double, note: String) = viewModelScope.launch {
-        val now = System.currentTimeMillis(); val m = (qty * 1000).roundToLong(); val c = (costRs * 100).roundToLong().coerceAtLeast(0L)
-        if (m <= 0L) return@launch
-        dao.batchStockInwardAtomically(listOf(StockInwardInput(id, m, c, note)), now)
-        dao.insertAuditLog(AuditLogEntity(actionType = "INWARD", refId = "#$id", summary = "+$qty @ ₹$costRs", deltaPaise = -SellerOperationsEngine.computeLinePaise(m, c), createdAt = now))
-        _statusMessage.value = "Stock inward saved."
-    }
-    fun recordExpense(type: String, amtRs: Double, note: String) = viewModelScope.launch {
-        val p = (amtRs * 100).roundToLong(); if (p <= 0L) return@launch
-        val now = System.currentTimeMillis()
-        dao.insertExpense(SellerExpenseEntity(expenseType = type, amountPaise = p, note = note, createdAt = now))
-        dao.insertShopExpense(ShopExpenseEntity(epochMs = now, category = type, note = note, amountPaise = p, isCash = true))
-        dao.insertAuditLog(AuditLogEntity(actionType = "EXPENSE", refId = type, summary = note.ifBlank { type }, deltaPaise = -p, createdAt = now))
-        _statusMessage.value = "Expense saved: ${CatalogFilterEngine.formatRs(p)}"
-    }
-    fun recordWaste(id: Int, qty: Double, lossRs: Double, reason: String) = viewModelScope.launch {
-        val now = System.currentTimeMillis(); val m = (qty * 1000).roundToLong().coerceAtLeast(0L); val p = (lossRs * 100).roundToLong().coerceAtLeast(0L)
-        if (m <= 0L && p <= 0L) return@launch
-        dao.batchWasteLogAtomically(listOf(WasteLogInput(id, m.coerceAtLeast(1L), p, reason)), now)
-        dao.insertAuditLog(AuditLogEntity(actionType = "WASTE", refId = "#$id", summary = reason, deltaPaise = -p, createdAt = now))
-        _statusMessage.value = "Waste logged."
-    }
-    fun upsertUdhaarCustomer(alias: String, area: String, deltaRs: Double, risk: String = "NORMAL", ex: CustomerUdhaarEntity? = null) {
-        val clean = alias.trim(); if (clean.isBlank()) return
-        viewModelScope.launch {
-            val now = System.currentTimeMillis(); val dP = (deltaRs * 100).roundToLong()
-            val bal = ((ex?.balancePaise ?: 0L) + dP).coerceAtLeast(0L)
-            dao.upsertCustomerUdhaar(CustomerUdhaarEntity(ex?.customerId ?: 0L, clean, area.trim(), bal, risk, now, ex?.isArchived ?: false))
-            dao.insertAuditLog(AuditLogEntity(actionType = "UDHAAR", refId = clean, summary = "Bal ${CatalogFilterEngine.formatRs(bal)}", deltaPaise = dP, createdAt = now))
-            _statusMessage.value = "Udhaar: $clean (${CatalogFilterEngine.formatRs(bal)})"
-        }
-    }
+    fun recordStockInward(id: Int, qty: Double, costRs: Double, note: String) = viewModelScope.launch { val now = System.currentTimeMillis(); val m = (qty * 1000).roundToLong(); val c = (costRs * 100).roundToLong().coerceAtLeast(0L); if (m <= 0L) return@launch; dao.batchStockInwardAtomically(listOf(StockInwardInput(id, m, c, note)), now); dao.insertAuditLog(AuditLogEntity(actionType = "INWARD", refId = "#$id", summary = "+$qty @ ₹$costRs", deltaPaise = -SellerOperationsEngine.computeLinePaise(m, c), createdAt = now)); _statusMessage.value = "Stock inward saved." }
+    fun recordExpense(type: String, amtRs: Double, note: String) = viewModelScope.launch { val p = (amtRs * 100).roundToLong(); if (p <= 0L) return@launch; val now = System.currentTimeMillis(); dao.insertExpense(SellerExpenseEntity(expenseType = type, amountPaise = p, note = note, createdAt = now)); dao.insertShopExpense(ShopExpenseEntity(epochMs = now, category = type, note = note, amountPaise = p, isCash = true)); dao.insertAuditLog(AuditLogEntity(actionType = "EXPENSE", refId = type, summary = note.ifBlank { type }, deltaPaise = -p, createdAt = now)); _statusMessage.value = "Expense saved: ${CatalogFilterEngine.formatRs(p)}" }
+    fun recordWaste(id: Int, qty: Double, lossRs: Double, reason: String) = viewModelScope.launch { val now = System.currentTimeMillis(); val m = (qty * 1000).roundToLong().coerceAtLeast(0L); val p = (lossRs * 100).roundToLong().coerceAtLeast(0L); if (m <= 0L && p <= 0L) return@launch; dao.batchWasteLogAtomically(listOf(WasteLogInput(id, m.coerceAtLeast(1L), p, reason)), now); dao.insertAuditLog(AuditLogEntity(actionType = "WASTE", refId = "#$id", summary = reason, deltaPaise = -p, createdAt = now)); _statusMessage.value = "Waste logged." }
+    fun upsertUdhaarCustomer(alias: String, area: String, deltaRs: Double, risk: String = "NORMAL", ex: CustomerUdhaarEntity? = null) { val clean = alias.trim(); if (clean.isBlank()) return; viewModelScope.launch { val now = System.currentTimeMillis(); val dP = (deltaRs * 100).roundToLong(); val bal = ((ex?.balancePaise ?: 0L) + dP).coerceAtLeast(0L); dao.upsertCustomerUdhaar(CustomerUdhaarEntity(ex?.customerId ?: 0L, clean, area.trim(), bal, risk, now, ex?.isArchived ?: false)); dao.insertAuditLog(AuditLogEntity(actionType = "UDHAAR", refId = clean, summary = "Bal ${CatalogFilterEngine.formatRs(bal)}", deltaPaise = dP, createdAt = now)); _statusMessage.value = "Udhaar: $clean (${CatalogFilterEngine.formatRs(bal)})" } }
     fun recordCashZReport(openRs: Double, countedRs: Double, note: String = "") = viewModelScope.launch {
         val now = System.currentTimeMillis()
-        val cal = Calendar.getInstance().apply { set(Calendar.HOUR_OF_DAY, 0); set(Calendar.MINUTE, 0); set(Calendar.SECOND, 0); set(Calendar.MILLISECOND, 0) }
+        val startCal = Calendar.getInstance().apply { set(Calendar.HOUR_OF_DAY, 0); set(Calendar.MINUTE, 0); set(Calendar.SECOND, 0); set(Calendar.MILLISECOND, 0) }
+        val endCal = Calendar.getInstance().apply { set(Calendar.HOUR_OF_DAY, 23); set(Calendar.MINUTE, 59); set(Calendar.SECOND, 59); set(Calendar.MILLISECOND, 999) }
         val openP = (openRs * 100).roundToLong().coerceAtLeast(0L); val cntP = (countedRs * 100).roundToLong().coerceAtLeast(0L)
-        val cashIn = recentOrders.value.filter { it.createdAt >= cal.timeInMillis && it.paymentStatus != "VOID" }.sumOf { it.cashPaise }
-        val expOut = recentExpenses.value.filter { it.createdAt >= cal.timeInMillis }.sumOf { it.amountPaise }
-        val expP = (openP + cashIn - expOut).coerceAtLeast(0L); val diff = cntP - expP
-        val day = SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date(now))
+        val cashIn = recentOrders.value.filter { it.createdAt in startCal.timeInMillis..endCal.timeInMillis && it.paymentStatus != "VOID" && it.orderStatus != "VOIDED" }.sumOf { it.cashPaise }
+        val expOut = dao.sumCashShopExpensesBetween(startCal.timeInMillis, endCal.timeInMillis)
+        val expP = (openP + cashIn - expOut).coerceAtLeast(0L); val diff = cntP - expP; val day = SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date(now))
         dao.insertCashZReport(CashZReportEntity(dayKey = day, openingFloatPaise = openP, expectedCashPaise = expP, countedCashPaise = cntP, variancePaise = diff, note = note.trim(), createdAt = now))
-        dao.insertAuditLog(AuditLogEntity(actionType = "Z_REPORT", refId = day, summary = "Diff ${CatalogFilterEngine.formatRs(diff)}", deltaPaise = diff, createdAt = now))
-        _statusMessage.value = "Cash Z-Report saved ($day)"
+        dao.insertAuditLog(AuditLogEntity(actionType = "Z_REPORT", refId = day, summary = "Diff ${CatalogFilterEngine.formatRs(diff)}", deltaPaise = diff, createdAt = now)); _statusMessage.value = "Cash Z-Report saved ($day)"
     }
     fun saveDraft(k: String, json: String) = viewModelScope.launch { dao.saveDraft(DraftStateEntity(k, json, System.currentTimeMillis())) }
     fun loadDraft(k: String, onDone: (String?) -> Unit) = viewModelScope.launch { onDone(dao.getDraft(k)?.payloadJson) }
     fun clearDraft(k: String) = viewModelScope.launch { dao.clearDraft(k) }
     fun selectBuyerShop(shopId: String) { _selectedBuyerShopId.value = shopId; prefs.edit().putString("last_shop_id", shopId).apply() }
-    fun handleScannedShopBoardQr(qrText: String) = viewModelScope.launch {
-        try {
-            val b = QrCodec.decodeSellerBoard(qrText); val now = System.currentTimeMillis()
-            dao.replaceShopCatalogSnapshot(
-                BuyerSavedShopEntity(b.shopId, b.shopName, b.catalogVersion, now, "", false, b.boardValidUntil, b.upiVpa),
-                b.items.map { BuyerShopPriceEntity(b.shopId, it.productId, it.pricePaise, it.qualityGrade, it.stockStatus, it.stockQtyMilli, it.bulkMinQtyMilli, it.bulkPricePaise, it.minOrderMilli, it.stepQtyMilli, it.varietyTag) }
-            )
-            selectBuyerShop(b.shopId)
-            _statusMessage.value = "Synced '${b.shopName}' (${b.items.size} items)"
-        } catch (e: Exception) { _statusMessage.value = "Invalid Shop QR: ${e.message}" }
-    }
-    fun setBuyerCartQuantity(id: Int, qtyM: Long, priceP: Long) {
-        val sid = _selectedBuyerShopId.value ?: return
-        viewModelScope.launch {
-            if (qtyM <= 0L) dao.removeCartItem(sid, id)
-            else dao.upsertCartItem(BuyerCartItemEntity(sid, id, qtyM, priceP, System.currentTimeMillis()))
-        }
-    }
+    fun handleScannedShopBoardQr(qrText: String) = viewModelScope.launch { try { val b = QrCodec.decodeSellerBoard(qrText); val now = System.currentTimeMillis(); dao.replaceShopCatalogSnapshot(BuyerSavedShopEntity(b.shopId, b.shopName, b.catalogVersion, now, "", false, b.boardValidUntil, b.upiVpa), b.items.map { BuyerShopPriceEntity(b.shopId, it.productId, it.pricePaise, it.qualityGrade, it.stockStatus, it.stockQtyMilli, it.bulkMinQtyMilli, it.bulkPricePaise, it.minOrderMilli, it.stepQtyMilli, it.varietyTag) }); selectBuyerShop(b.shopId); _statusMessage.value = "Synced '${b.shopName}' (${b.items.size} items)" } catch (e: Exception) { _statusMessage.value = "Invalid Shop QR: ${e.message}" } }
+    fun setBuyerCartQuantity(id: Int, qtyM: Long, priceP: Long) { val sid = _selectedBuyerShopId.value ?: return; viewModelScope.launch { if (qtyM <= 0L) dao.removeCartItem(sid, id) else dao.upsertCartItem(BuyerCartItemEntity(sid, id, qtyM, priceP, System.currentTimeMillis())) } }
     fun clearActiveBuyerCart() { val sid = _selectedBuyerShopId.value ?: return; viewModelScope.launch { dao.clearShopCart(sid) } }
-    fun toggleBuyerHiddenProduct(id: Int, hide: Boolean) = viewModelScope.launch {
-        if (hide) dao.hideProductForBuyer(BuyerHiddenProductEntity(id, System.currentTimeMillis())) else dao.unhideProductForBuyer(id)
-    }
-    fun buildBuyerCartQr(): String? {
-        val sid = _selectedBuyerShopId.value ?: return null; val c = activeBuyerCart.value; if (c.isEmpty()) return null
-        val alias = buyerProfile.value?.buyerAlias?.ifBlank { "B636" } ?: "B636"
-        val m = System.currentTimeMillis() / 60000L; val h = c.sumOf { it.productId * 31 + it.qtyMilli.toInt() } and 0xFFFF
-        return QrCodec.encodeBuyerCart(QrCodec.BuyerCartPayload(sid, alias, m, c.map { QrCodec.CartLine(it.productId, it.qtyMilli) }, "${m}_$h"))
-    }
-    fun handleScannedReceiptQr(qrText: String) = viewModelScope.launch {
-        try {
-            val r = QrCodec.decodeReceipt(qrText)
-            if (dao.countReceiptsByCode(r.receiptCode) > 0) { _statusMessage.value = "Receipt ${r.receiptCode} already saved."; return@launch }
-            val sName = savedShops.value.firstOrNull { it.shopId == r.shopId }?.shopName ?: r.shopId
-            dao.insertBuyerReceipt(BuyerReceiptEntity(shopId = r.shopId, shopName = sName, receiptCode = r.receiptCode, totalPaise = r.totalPaise, itemsSummary = "${r.lines.size} items", createdAt = System.currentTimeMillis(), originalTotalPaise = r.originalTotalPaise, paidPaise = r.paidPaise, varianceReason = r.varianceReason, paymentMode = r.paymentMode))
-            _statusMessage.value = "Receipt ${r.receiptCode} saved"
-        } catch (e: Exception) { _statusMessage.value = "Invalid Receipt QR: ${e.message}" }
-    }
+    fun toggleBuyerHiddenProduct(id: Int, hide: Boolean) = viewModelScope.launch { if (hide) dao.hideProductForBuyer(BuyerHiddenProductEntity(id, System.currentTimeMillis())) else dao.unhideProductForBuyer(id) }
+    fun buildBuyerCartQr(): String? { val sid = _selectedBuyerShopId.value ?: return null; val c = activeBuyerCart.value; if (c.isEmpty()) return null; val alias = buyerProfile.value?.buyerAlias?.ifBlank { "B636" } ?: "B636"; val m = System.currentTimeMillis() / 60000L; val h = c.sumOf { it.productId * 31 + it.qtyMilli.toInt() } and 0xFFFF; return QrCodec.encodeBuyerCart(QrCodec.BuyerCartPayload(sid, alias, m, c.map { QrCodec.CartLine(it.productId, it.qtyMilli) }, "${m}_$h")) }
+    fun handleScannedReceiptQr(qrText: String) = viewModelScope.launch { try { val r = QrCodec.decodeReceipt(qrText); if (dao.countReceiptsByCode(r.receiptCode) > 0) { _statusMessage.value = "Receipt ${r.receiptCode} already saved."; return@launch }; val sName = savedShops.value.firstOrNull { it.shopId == r.shopId }?.shopName ?: r.shopId; dao.insertBuyerReceipt(BuyerReceiptEntity(shopId = r.shopId, shopName = sName, receiptCode = r.receiptCode, totalPaise = r.totalPaise, itemsSummary = "${r.lines.size} items", createdAt = System.currentTimeMillis(), originalTotalPaise = r.originalTotalPaise, paidPaise = r.paidPaise, varianceReason = r.varianceReason, paymentMode = r.paymentMode)); _statusMessage.value = "Receipt ${r.receiptCode} saved" } catch (e: Exception) { _statusMessage.value = "Invalid Receipt QR: ${e.message}" } }
     fun observeProductComparison(id: Int): Flow<List<ShopPriceComparisonRow>> = dao.observeComparisonForProduct(id)
     fun computeQtyForRupees(rs: Double, unitPriceP: Long): Long = SellerOperationsEngine.rupeesToMilliQty((rs * 100).roundToLong(), unitPriceP)
     fun refreshOfflineAudit() = viewModelScope.launch { _auditReport.value = OfflineTrustVerifier.runLiveAudit(getApplication()) }
     fun checkAppLock() { _isLocked.value = appLockManager.isLockEnabled() && appLockManager.getConfig().scope == LockScope.FULL_APP }
     fun lockAfterBackground(lastActiveMs: Long) { if (appLockManager.getConfig().scope == LockScope.FULL_APP && appLockManager.shouldLockAfterBackground(lastActiveMs)) _isLocked.value = true }
     fun unlockApp() { _isLocked.value = false }
-    private val _lastSosChunk = MutableStateFlow<QrCodec.SosRelayChunk?>(null)
-    val lastSosChunk = _lastSosChunk.asStateFlow()
-    fun clearLastSos() { _lastSosChunk.value = null }
-
-    fun buildSosQrFrames(kind: String): List<String> {
-        val m = System.currentTimeMillis() / 60000L; val sid = "SOS${m % 10000}"
-        return when (kind) {
-            "X1" -> {
-                val p = sellerProfile.value ?: return emptyList()
-                val body = rawSellerCatalog.value.filter { it.isEnabledInShop && it.pricePaise > 0L }.take(25).joinToString(",") { "${it.productId}:${it.pricePaise}" }
-                QrCodec.encodeSosChunk(QrCodec.SosRelayChunk("X1", sid, p.shopId, p.shopName, p.upiVpa, m, body))
-            }
-            "B1" -> {
-                val shopId = _selectedBuyerShopId.value ?: return emptyList()
-                val shop = savedShops.value.firstOrNull { it.shopId == shopId }
-                val cart = activeBuyerCart.value; if (cart.isEmpty()) return emptyList()
-                val body = cart.joinToString(",") { "${it.productId}:${it.qtyMilli}" }
-                QrCodec.encodeSosChunk(QrCodec.SosRelayChunk("B1", sid, shopId, shop?.shopName ?: shopId, shop?.upiVpa ?: "", m, body))
-            }
-            else -> {
-                val p = sellerProfile.value ?: return emptyList(); val r = profitReport.value
-                val body = "ORD=${r.completedOrders},CASH=${r.cashPaise},UPI=${r.upiPaise},NET=${r.trueNetProfitPaise}"
-                QrCodec.encodeSosChunk(QrCodec.SosRelayChunk("X3", sid, p.shopId, p.shopName, p.upiVpa, m, body))
-            }
-        }
-    }
-    fun handleScannedSosQr(qrText: String) = viewModelScope.launch {
-        try {
-            val c = QrCodec.decodeSosChunk(qrText); _lastSosChunk.value = c; val now = System.currentTimeMillis()
-            when (c.kind) {
-                "B1" -> {
-                    val pairs = c.body.split(",").mapNotNull { t -> val s = t.split(":"); if (s.size == 2) s[0].toIntOrNull()?.let { id -> s[1].toLongOrNull()?.let { q -> id to q } } else null }
-                    if (pairs.isNotEmpty()) {
-                        selectBuyerShop(c.shopId)
-                        pairs.forEach { (id, q) -> val pr = rawBuyerCatalog.value.firstOrNull { it.productId == id }?.pricePaise ?: 0L; dao.upsertCartItem(BuyerCartItemEntity(c.shopId, id, q, pr, now)) }
-                        _statusMessage.value = "SOS Cart (${pairs.size} items) imported!"
-                    }
-                }
-                "X1" -> {
-                    val prices = c.body.split(",").mapNotNull { t -> val s = t.split(":"); if (s.size == 2) s[0].toIntOrNull()?.let { id -> s[1].toLongOrNull()?.let { pr -> BuyerShopPriceEntity(c.shopId, id, pr, "A", 1) } } else null }
-                    if (prices.isNotEmpty()) {
-                        dao.replaceShopCatalogSnapshot(BuyerSavedShopEntity(c.shopId, c.shopName, 1, now, "SOS", false, 0L, c.upiVpa), prices)
-                        selectBuyerShop(c.shopId); _statusMessage.value = "SOS Shop '${c.shopName}' (${prices.size} items) loaded!"
-                    }
-                }
-                "X3" -> {
-                    dao.insertAuditLog(AuditLogEntity(actionType = "SOS_X3", refId = c.relaySessionId, summary = "${c.shopName}: ${c.body}", createdAt = now))
-                    _statusMessage.value = "SOS Return Sync logged (${c.relaySessionId})"
-                }
-            }
-        } catch (e: Exception) { _statusMessage.value = "Invalid SOS QR: ${e.message}" }
-    }
+    private val _lastSosChunk = MutableStateFlow<QrCodec.SosRelayChunk?>(null); val lastSosChunk = _lastSosChunk.asStateFlow(); fun clearLastSos() { _lastSosChunk.value = null }
+    fun buildSosQrFrames(kind: String): List<String> { val m = System.currentTimeMillis() / 60000L; val sid = "SOS${m % 10000}"; return when (kind) { "X1" -> { val p = sellerProfile.value ?: return emptyList(); val body = rawSellerCatalog.value.filter { it.isEnabledInShop && it.pricePaise > 0L }.take(25).joinToString(",") { "${it.productId}:${it.pricePaise}" }; QrCodec.encodeSosChunk(QrCodec.SosRelayChunk("X1", sid, p.shopId, p.shopName, p.upiVpa, m, body)) }; "B1" -> { val shopId = _selectedBuyerShopId.value ?: return emptyList(); val shop = savedShops.value.firstOrNull { it.shopId == shopId }; val cart = activeBuyerCart.value; if (cart.isEmpty()) return emptyList(); val body = cart.joinToString(",") { "${it.productId}:${it.qtyMilli}" }; QrCodec.encodeSosChunk(QrCodec.SosRelayChunk("B1", sid, shopId, shop?.shopName ?: shopId, shop?.upiVpa ?: "", m, body)) }; else -> { val p = sellerProfile.value ?: return emptyList(); val r = profitReport.value; val body = "ORD=${r.completedOrders},CASH=${r.cashPaise},UPI=${r.upiPaise},NET=${r.trueNetProfitPaise}"; QrCodec.encodeSosChunk(QrCodec.SosRelayChunk("X3", sid, p.shopId, p.shopName, p.upiVpa, m, body)) } } }
+    fun handleScannedSosQr(qrText: String) = viewModelScope.launch { try { val c = QrCodec.decodeSosChunk(qrText); _lastSosChunk.value = c; val now = System.currentTimeMillis(); when (c.kind) { "B1" -> { val pairs = c.body.split(",").mapNotNull { t -> val s = t.split(":"); if (s.size == 2) s[0].toIntOrNull()?.let { id -> s[1].toLongOrNull()?.let { q -> id to q } } else null }; if (pairs.isNotEmpty()) { selectBuyerShop(c.shopId); pairs.forEach { (id, q) -> val pr = rawBuyerCatalog.value.firstOrNull { it.productId == id }?.pricePaise ?: 0L; dao.upsertCartItem(BuyerCartItemEntity(c.shopId, id, q, pr, now)) }; _statusMessage.value = "SOS Cart (${pairs.size} items) imported!" } }; "X1" -> { val prices = c.body.split(",").mapNotNull { t -> val s = t.split(":"); if (s.size == 2) s[0].toIntOrNull()?.let { id -> s[1].toLongOrNull()?.let { pr -> BuyerShopPriceEntity(c.shopId, id, pr, "A", 1) } } else null }; if (prices.isNotEmpty()) { dao.replaceShopCatalogSnapshot(BuyerSavedShopEntity(c.shopId, c.shopName, 1, now, "SOS", false, 0L, c.upiVpa), prices); selectBuyerShop(c.shopId); _statusMessage.value = "SOS Shop '${c.shopName}' (${prices.size} items) loaded!" } }; "X3" -> { dao.insertAuditLog(AuditLogEntity(actionType = "SOS_X3", refId = c.relaySessionId, summary = "${c.shopName}: ${c.body}", createdAt = now)); _statusMessage.value = "SOS Return Sync logged (${c.relaySessionId})" } } } catch (e: Exception) { _statusMessage.value = "Invalid SOS QR: ${e.message}" } }
 }
