@@ -7,6 +7,7 @@ enum class AppLanguage { TAMIL, ENGLISH, BILINGUAL }
 enum class AppThemeMode { SUNLIGHT_LIGHT, OLED_DARK }
 
 enum class ViewMode(val labelEn: String, val labelTa: String) {
+    ADAPTIVE_GRID("Adaptive Grid", "தானியங்கி கட்டம்"),
     ACCORDION_HEADERS("Headers (▲/▼)", "தலைப்புகள் (▲/▼)"),
     COMPACT_LIST("Compact List", "சுருக்கப் பட்டியல்"),
     GRID_2_COL("2-Col Grid", "2-நிரல் கட்டம்"),
@@ -31,10 +32,7 @@ enum class IconDensity(val iconDp: Int, val rowDp: Int) {
     MEDIUM(40, 68)
 }
 
-enum class ExpandStyle {
-    INLINE_EXPAND,
-    ZOOM_PREVIEW_CARD
-}
+enum class ExpandStyle { INLINE_EXPAND, ZOOM_PREVIEW_CARD }
 
 enum class PriceBracket(val label: String, val minPaise: Long, val maxPaise: Long) {
     ALL("All ₹", 0L, Long.MAX_VALUE),
@@ -53,7 +51,7 @@ data class CatalogFilterState(
     val sellerShowAddedOnly: Boolean = true,
     val buyerHidePersonalHidden: Boolean = true,
     val sortOption: SortOption = SortOption.CATALOG_ID_ASC,
-    val viewMode: ViewMode = ViewMode.ACCORDION_HEADERS
+    val viewMode: ViewMode = ViewMode.ADAPTIVE_GRID
 )
 
 data class VisualCustomization(
@@ -80,24 +78,19 @@ object CatalogFilterEngine {
     ): List<CatalogDisplayItem> {
         val q = filter.searchQuery.trim().lowercase()
         val filtered = raw.filter { item ->
-            val roleVisibilityOk = if (role == UserRole.SELLER && filter.sellerShowAddedOnly) {
-                item.isEnabledInShop
-            } else {
-                true
-            }
+            val roleOk = if (role == UserRole.SELLER && filter.sellerShowAddedOnly) item.isEnabledInShop else true
             val queryOk = q.isEmpty() ||
                 item.nameEn.lowercase().contains(q) ||
                 item.nameTa.lowercase().contains(q) ||
-                item.productId.toString() == q
+                item.productId.toString() == q ||
+                item.searchKeywords.lowercase().contains(q)
             val catOk = filter.selectedCategories.isEmpty() || item.categoryCode in filter.selectedCategories
             val gradeOk = filter.selectedGrades.isEmpty() || item.qualityGrade in filter.selectedGrades
             val unitOk = filter.selectedUnits.isEmpty() || item.unit in filter.selectedUnits
             val priceOk = filter.priceBracket == PriceBracket.ALL ||
                 (item.pricePaise in filter.priceBracket.minPaise..filter.priceBracket.maxPaise)
-
-            roleVisibilityOk && queryOk && catOk && gradeOk && unitOk && priceOk
+            roleOk && queryOk && catOk && gradeOk && unitOk && priceOk
         }
-
         return when (filter.sortOption) {
             SortOption.CATALOG_ID_ASC -> filtered.sortedBy { it.productId }
             SortOption.NAME_EN_ASC -> filtered.sortedBy { it.nameEn.lowercase() }
@@ -119,19 +112,18 @@ object CatalogFilterEngine {
         return CATEGORY_ORDER.mapNotNull { code ->
             val list = grouped[code]
             if (list.isNullOrEmpty()) null else {
-                val first = list.first()
-                CategorySection(code, first.categoryEn, first.categoryTa, list)
+                val f = list.first()
+                CategorySection(code, f.categoryEn, f.categoryTa, list)
             }
         }
     }
 
     fun formatRs(paise: Long): String = "₹${"%.2f".format(paise / 100.0)}"
 
-    fun formatQty(milli: Long, unit: String): String {
-        return if (unit == "kg") {
+    fun formatQty(milli: Long, unit: String): String =
+        if (unit == "kg") {
             if (milli < 1000L) "${milli}g" else "${"%.2f".format(milli / 1000.0).trimEnd('0').trimEnd('.')} kg"
         } else {
             "${"%.1f".format(milli / 1000.0).trimEnd('0').trimEnd('.')} $unit"
         }
-    }
 }

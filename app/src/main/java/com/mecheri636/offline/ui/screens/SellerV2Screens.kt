@@ -13,6 +13,7 @@ import androidx.compose.ui.unit.dp
 import com.mecheri636.offline.data.db.*
 import com.mecheri636.offline.domain.DailyProfitReport
 import com.mecheri636.offline.ui.catalog.CatalogFilterEngine
+import com.mecheri636.offline.ui.catalog.MozhiMuthalWheelPanel
 import java.text.SimpleDateFormat
 import java.util.*
 
@@ -28,7 +29,11 @@ fun SellerOpsHubScreen(
     onAddZReport: (Double, Double, String) -> Unit,
     onSaveDraft: (String, String) -> Unit,
     onLoadDraft: (String, (String?) -> Unit) -> Unit,
-    onClearDraft: (String) -> Unit
+    onClearDraft: (String) -> Unit,
+    isTamilMode: Boolean = true,
+    volumeKeyStepEnabled: Boolean = false,
+    onToggleVolumeKeyStep: ((Boolean) -> Unit)? = null,
+    volumeStepEvent: Pair<Int, Int> = 0 to 0
 ) {
     var sub by remember { mutableStateOf(0) }
     Column(Modifier.fillMaxSize()) {
@@ -39,7 +44,7 @@ fun SellerOpsHubScreen(
         }
         when (sub) {
             0 -> SellerBusinessOpsScreen(profit, enabledItems, onAddExpense, onAddWaste, onAddStockInward)
-            1 -> SellerUdhaarPanel(udhaarList, onUpsertUdhaar, onSaveDraft, onLoadDraft, onClearDraft)
+            1 -> SellerUdhaarPanel(udhaarList, onUpsertUdhaar, onSaveDraft, onLoadDraft, onClearDraft, isTamilMode, volumeKeyStepEnabled, onToggleVolumeKeyStep, volumeStepEvent)
             2 -> SellerCashZReportPanel(zReports, onAddZReport, onSaveDraft, onLoadDraft, onClearDraft)
             else -> SellerAuditLogPanel(auditLogs)
         }
@@ -50,13 +55,15 @@ fun SellerOpsHubScreen(
 private fun SellerUdhaarPanel(
     list: List<CustomerUdhaarEntity>,
     onUpsert: (String, String, Double, String, CustomerUdhaarEntity?) -> Unit,
-    onSaveDraft: (String, String) -> Unit,
-    onLoadDraft: (String, (String?) -> Unit) -> Unit,
-    onClearDraft: (String) -> Unit
+    onSaveDraft: (String, String) -> Unit, onLoadDraft: (String, (String?) -> Unit) -> Unit, onClearDraft: (String) -> Unit,
+    isTamilMode: Boolean, volumeKeyStepEnabled: Boolean,
+    onToggleVolumeKeyStep: ((Boolean) -> Unit)?, volumeStepEvent: Pair<Int, Int>
 ) {
     var alias by remember { mutableStateOf("") }; var area by remember { mutableStateOf("") }
     var amt by remember { mutableStateOf("") }; var risk by remember { mutableStateOf("NORMAL") }
     var sel by remember { mutableStateOf<CustomerUdhaarEntity?>(null) }
+    var wheelFiltered by remember { mutableStateOf<List<CustomerUdhaarEntity>?>(null) }
+    val visibleList = if (list.isEmpty()) emptyList() else (wheelFiltered ?: list)
     val numKb = KeyboardOptions(keyboardType = KeyboardType.Decimal)
     LaunchedEffect(Unit) {
         onLoadDraft("draft_udhaar") { raw ->
@@ -81,15 +88,10 @@ private fun SellerUdhaarPanel(
                     OutlinedTextField(area, { area = it }, label = { Text("Street / Area Note") }, singleLine = true, modifier = Modifier.fillMaxWidth())
                     OutlinedTextField(amt, { amt = it }, label = { Text("Amount ₹") }, keyboardOptions = numKb, singleLine = true, modifier = Modifier.fillMaxWidth())
                     Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                        listOf("NORMAL", "WATCH", "HIGH_RISK").forEach { r ->
-                            FilterChip(risk == r, { risk = r }, { Text(r) })
-                        }
+                        listOf("NORMAL", "WATCH", "HIGH_RISK").forEach { r -> FilterChip(risk == r, { risk = r }, { Text(r) }) }
                     }
                     val go: (Double) -> Unit = { m ->
-                        if (alias.isNotBlank()) {
-                            onUpsert(alias, area, (amt.toDoubleOrNull() ?: 0.0) * m, risk, sel)
-                            amt = ""; sel = null; onClearDraft("draft_udhaar")
-                        }
+                        if (alias.isNotBlank()) { onUpsert(alias, area, (amt.toDoubleOrNull() ?: 0.0) * m, risk, sel); amt = ""; sel = null; onClearDraft("draft_udhaar") }
                     }
                     Row(horizontalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.fillMaxWidth()) {
                         Button({ go(1.0) }, Modifier.weight(1f)) { Text("+ Due") }
@@ -99,7 +101,17 @@ private fun SellerUdhaarPanel(
                 }
             }
         }
-        items(list, key = { it.customerId }) { c ->
+        if (list.isNotEmpty()) {
+            item {
+                MozhiMuthalWheelPanel(
+                    items = list, isTamilMode = isTamilMode, showShapeToggle = false,
+                    volumeKeyStepEnabled = volumeKeyStepEnabled, onToggleVolumeKeyStep = onToggleVolumeKeyStep,
+                    volumeStepEvent = volumeStepEvent, tamilLabel = { it.alias }, englishLabel = { it.alias },
+                    categoryCode = { it.riskTag }, onFilteredChange = { wheelFiltered = it }
+                )
+            }
+        }
+        items(visibleList, key = { it.customerId }) { c ->
             Card(Modifier.fillMaxWidth().clickable { sel = c; alias = c.alias; area = c.areaNote; risk = c.riskTag }) {
                 Row(Modifier.fillMaxWidth().padding(12.dp), Arrangement.SpaceBetween) {
                     Column(Modifier.weight(1f)) {

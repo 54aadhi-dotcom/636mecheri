@@ -2,6 +2,7 @@ package com.mecheri636.offline
 
 import android.os.Bundle
 import android.os.SystemClock
+import android.view.KeyEvent
 import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -28,6 +29,8 @@ private enum class ActiveScanner { NONE, BUYER_SCAN_SHOP, BUYER_SCAN_RECEIPT, SE
 class MainActivity : ComponentActivity() {
     private var lastBgMs = 0L
     private val bgTick = mutableStateOf(0)
+    private val volumeKeyStepEnabled = mutableStateOf(false)
+    private val volumeStepEvent = mutableStateOf(0 to 0)
     private var lockMgr: AppLockManager? = null
 
     private fun applyFlagSecure(on: Boolean) {
@@ -39,7 +42,31 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         val m = AppLockManager(this).also { lockMgr = it }
         applyFlagSecure(m.isLockEnabled() && m.getConfig().flagSecureEnabled)
-        setContent { MecheriRootApp(viewModel(), bgTick.value, ::applyFlagSecure) }
+        setContent {
+            MecheriRootApp(
+                vm = viewModel(),
+                bgTick = bgTick.value,
+                volumeKeyStepEnabled = volumeKeyStepEnabled.value,
+                onToggleVolumeKeyStep = { volumeKeyStepEnabled.value = it },
+                volumeStepEvent = volumeStepEvent.value,
+                onApplyFlagSecure = ::applyFlagSecure
+            )
+        }
+    }
+
+    override fun onKeyDown(keyCode: Int, event: KeyEvent?): Boolean {
+        if (volumeKeyStepEnabled.value) {
+            when (keyCode) {
+                KeyEvent.KEYCODE_VOLUME_UP -> { volumeStepEvent.value = (volumeStepEvent.value.first + 1) to -1; return true }
+                KeyEvent.KEYCODE_VOLUME_DOWN -> { volumeStepEvent.value = (volumeStepEvent.value.first + 1) to 1; return true }
+            }
+        }
+        return super.onKeyDown(keyCode, event)
+    }
+
+    override fun onKeyUp(keyCode: Int, event: KeyEvent?): Boolean {
+        if (volumeKeyStepEnabled.value && (keyCode == KeyEvent.KEYCODE_VOLUME_UP || keyCode == KeyEvent.KEYCODE_VOLUME_DOWN)) return true
+        return super.onKeyUp(keyCode, event)
     }
 
     override fun onStop() { super.onStop(); lastBgMs = SystemClock.elapsedRealtime() }
@@ -55,7 +82,11 @@ class MainActivity : ComponentActivity() {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun MecheriRootApp(vm: MecheriViewModel, bgTick: Int, onApplyFlagSecure: (Boolean) -> Unit) {
+fun MecheriRootApp(
+    vm: MecheriViewModel, bgTick: Int, volumeKeyStepEnabled: Boolean,
+    onToggleVolumeKeyStep: (Boolean) -> Unit, volumeStepEvent: Pair<Int, Int>,
+    onApplyFlagSecure: (Boolean) -> Unit
+) {
     val role by vm.role.collectAsStateWithLifecycle()
     val customization by vm.customization.collectAsStateWithLifecycle()
     val filter by vm.filter.collectAsStateWithLifecycle()
@@ -146,10 +177,10 @@ fun MecheriRootApp(vm: MecheriViewModel, bgTick: Int, onApplyFlagSecure: (Boolea
                         0 -> Column(Modifier.fillMaxSize()) {
                             CatalogToolbar(UserRole.SELLER, filter, vm::updateFilter, { showSort = true }, { showFilter = true }, { showCustom = true })
                             val vis = remember(rawSellerItems, filter) { CatalogFilterEngine.apply(rawSellerItems, UserRole.SELLER, filter) }
-                            MultiViewCatalogBrowser(vis, UserRole.SELLER, filter, customization, { id, en -> vm.setSellerItemEnabled(id, en) }, { c, en -> vm.setCategoryEnabledForSeller(c, en) }, { editItem = it }, { _, _, _ -> }, {})
+                            MultiViewCatalogBrowser(vis, UserRole.SELLER, filter, customization, { id, en -> vm.setSellerItemEnabled(id, en) }, { c, en -> vm.setCategoryEnabledForSeller(c, en) }, { editItem = it }, { _, _, _ -> }, {}, volumeKeyStepEnabled, onToggleVolumeKeyStep, volumeStepEvent)
                         }
                         1 -> SellerLiveBoardQrScreen(prof, remember(rawSellerItems, prof) { vm.buildSellerShopBoardQrFrames() }, { v, p -> vm.updateShopUpi(v, p) }, { activeScanner = ActiveScanner.SELLER_SCAN_CART })
-                        2 -> if (scopedLock) AppLockGateScreen(vm.appLockManager) { vm.unlockApp(); vaultUnlocked = true } else SellerOpsHubScreen(profitReport, remember(rawSellerItems) { rawSellerItems.filter { it.isEnabledInShop } }, udhaarList, zReports, auditLogs, { t, a, n -> vm.recordExpense(t, a, n) }, { id, q, l, r -> vm.recordWaste(id, q, l, r) }, { id, q, c, n -> vm.recordStockInward(id, q, c, n) }, { al, ar, d, r, ex -> vm.upsertUdhaarCustomer(al, ar, d, r, ex) }, { o, c, n -> vm.recordCashZReport(o, c, n) }, { k, j -> vm.saveDraft(k, j) }, { k, cb -> vm.loadDraft(k, cb) }, { k -> vm.clearDraft(k) })
+                        2 -> if (scopedLock) AppLockGateScreen(vm.appLockManager) { vm.unlockApp(); vaultUnlocked = true } else SellerOpsHubScreen(profitReport, remember(rawSellerItems) { rawSellerItems.filter { it.isEnabledInShop } }, udhaarList, zReports, auditLogs, { t, a, n -> vm.recordExpense(t, a, n) }, { id, q, l, r -> vm.recordWaste(id, q, l, r) }, { id, q, c, n -> vm.recordStockInward(id, q, c, n) }, { al, ar, d, r, ex -> vm.upsertUdhaarCustomer(al, ar, d, r, ex) }, { o, c, n -> vm.recordCashZReport(o, c, n) }, { k, j -> vm.saveDraft(k, j) }, { k, cb -> vm.loadDraft(k, cb) }, { k -> vm.clearDraft(k) }, customization.language != AppLanguage.ENGLISH, volumeKeyStepEnabled, onToggleVolumeKeyStep, volumeStepEvent)
                     }
                 } else {
                     when (selectedTab) {
@@ -157,7 +188,7 @@ fun MecheriRootApp(vm: MecheriViewModel, bgTick: Int, onApplyFlagSecure: (Boolea
                         1 -> Column(Modifier.fillMaxSize()) {
                             CatalogToolbar(UserRole.BUYER, filter, vm::updateFilter, { showSort = true }, { showFilter = true }, { showCustom = true })
                             val vis = remember(rawBuyerItems, filter) { CatalogFilterEngine.apply(rawBuyerItems, UserRole.BUYER, filter) }
-                            MultiViewCatalogBrowser(vis, UserRole.BUYER, filter, customization, { _, _ -> }, { _, _ -> }, {}, { id, m, p -> vm.setBuyerCartQuantity(id, m, p) }, { id -> vm.toggleBuyerHiddenProduct(id, true) })
+                            MultiViewCatalogBrowser(vis, UserRole.BUYER, filter, customization, { _, _ -> }, { _, _ -> }, {}, { id, m, p -> vm.setBuyerCartQuantity(id, m, p) }, { id -> vm.toggleBuyerHiddenProduct(id, true) }, volumeKeyStepEnabled, onToggleVolumeKeyStep, volumeStepEvent)
                         }
                         2 -> BuyerCartAndQrScreen(savedShops.firstOrNull { it.shopId == selectedShopId }?.shopName ?: "Selected Shop", buyerCart, remember(rawBuyerItems) { rawBuyerItems.associateBy { it.productId } }, remember(buyerCart, selectedShopId) { vm.buildBuyerCartQr() }, buyerReceipts, { vm.clearActiveBuyerCart() }, { activeScanner = ActiveScanner.BUYER_SCAN_RECEIPT })
                     }
