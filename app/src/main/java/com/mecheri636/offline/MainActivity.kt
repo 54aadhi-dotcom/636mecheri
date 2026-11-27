@@ -1,6 +1,8 @@
 package com.mecheri636.offline
 
 import android.os.Bundle
+import android.os.SystemClock
+import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.layout.*
@@ -16,6 +18,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.mecheri636.offline.data.db.CatalogDisplayItem
 import com.mecheri636.offline.qr.OfflineQrScannerScreen
+import com.mecheri636.offline.security.*
 import com.mecheri636.offline.ui.MecheriViewModel
 import com.mecheri636.offline.ui.catalog.*
 import com.mecheri636.offline.ui.screens.*
@@ -23,15 +26,36 @@ import com.mecheri636.offline.ui.screens.*
 private enum class ActiveScanner { NONE, BUYER_SCAN_SHOP, BUYER_SCAN_RECEIPT, SELLER_SCAN_CART, SCAN_SOS }
 
 class MainActivity : ComponentActivity() {
+    private var lastBgMs = 0L
+    private val bgTick = mutableStateOf(0)
+    private var lockMgr: AppLockManager? = null
+
+    private fun applyFlagSecure(on: Boolean) {
+        if (on) window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
+        else window.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        setContent { MecheriRootApp(viewModel()) }
+        val m = AppLockManager(this).also { lockMgr = it }
+        applyFlagSecure(m.isLockEnabled() && m.getConfig().flagSecureEnabled)
+        setContent { MecheriRootApp(viewModel(), bgTick.value, ::applyFlagSecure) }
+    }
+
+    override fun onStop() { super.onStop(); lastBgMs = SystemClock.elapsedRealtime() }
+
+    override fun onStart() {
+        super.onStart()
+        val m = lockMgr ?: return
+        applyFlagSecure(m.isLockEnabled() && m.getConfig().flagSecureEnabled)
+        if (lastBgMs > 0L && m.shouldLockAfterBackground(lastBgMs)) bgTick.value += 1
+        lastBgMs = 0L
     }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun MecheriRootApp(vm: MecheriViewModel) {
+fun MecheriRootApp(vm: MecheriViewModel, bgTick: Int, onApplyFlagSecure: (Boolean) -> Unit) {
     val role by vm.role.collectAsStateWithLifecycle()
     val customization by vm.customization.collectAsStateWithLifecycle()
     val filter by vm.filter.collectAsStateWithLifecycle()
@@ -52,16 +76,21 @@ fun MecheriRootApp(vm: MecheriViewModel) {
     val auditReport by vm.auditReport.collectAsStateWithLifecycle()
     val statusMsg by vm.statusMessage.collectAsStateWithLifecycle()
     val isLocked by vm.isLocked.collectAsStateWithLifecycle()
+    var vaultUnlocked by remember { mutableStateOf(false) }
+    var lockRefresh by remember { mutableStateOf(0) }
     LaunchedEffect(Unit) { vm.checkAppLock() }
+    LaunchedEffect(bgTick) { if (bgTick > 0) { vaultUnlocked = false; vm.checkAppLock() } }
     var selectedTab by remember(role) { mutableStateOf(0) }
     var activeScanner by remember { mutableStateOf(ActiveScanner.NONE) }
     var showSort by remember { mutableStateOf(false) }
     var showFilter by remember { mutableStateOf(false) }
     var showCustom by remember { mutableStateOf(false) }
     var editItem by remember { mutableStateOf<CatalogDisplayItem?>(null) }
+    val lockCfg = remember(isLocked, lockRefresh, vaultUnlocked, selectedTab) { vm.appLockManager.getConfig() }
+    val scopedLock = isLocked && lockCfg.scope == LockScope.PROFIT_AND_VAULT_ONLY && !vaultUnlocked
     val colors = if (customization.themeMode == AppThemeMode.OLED_DARK) darkColorScheme(primary = Color(0xFF81C784), background = Color.Black, surface = Color(0xFF121212)) else lightColorScheme(primary = Color(0xFF1B5E20), secondaryContainer = Color(0xFFE8F5E9))
     MaterialTheme(colorScheme = colors) {
-        if (isLocked) { AppLockGateScreen(vm.appLockManager) { vm.unlockApp() }; return@MaterialTheme }
+        if (isLocked && lockCfg.scope == LockScope.FULL_APP) { AppLockGateScreen(vm.appLockManager) { vm.unlockApp(); vaultUnlocked = true }; return@MaterialTheme }
         if (activeScanner != ActiveScanner.NONE) {
             OfflineQrScannerScreen(
                 title = when (activeScanner) { ActiveScanner.BUYER_SCAN_SHOP -> "Scan Shop QR"; ActiveScanner.BUYER_SCAN_RECEIPT -> "Scan Receipt QR"; ActiveScanner.SCAN_SOS -> "Scan SOS QR"; else -> "Scan Cart QR" },
@@ -107,7 +136,8 @@ fun MecheriRootApp(vm: MecheriViewModel) {
         ) { pad ->
             Box(Modifier.fillMaxSize().padding(pad)) {
                 if (selectedTab == 3) {
-                    TrustVerifierScreen(auditReport, { vm.refreshOfflineAudit() }, vm.appLockManager, { vm.checkAppLock() })
+                    if (scopedLock) AppLockGateScreen(vm.appLockManager) { vm.unlockApp(); vaultUnlocked = true }
+                    else TrustVerifierScreen(auditReport, { vm.refreshOfflineAudit() }, vm.appLockManager, { vaultUnlocked = false; lockRefresh += 1; vm.checkAppLock() }, { on -> lockRefresh += 1; onApplyFlagSecure(vm.appLockManager.isLockEnabled() && on) })
                 } else if (role == UserRole.SELLER) {
                     val prof = sellerProfile
                     if (prof == null) SellerShopSetupCard(null) { n, a, u, p -> vm.createOrUpdateShop(n, a, u, p) }
@@ -119,7 +149,7 @@ fun MecheriRootApp(vm: MecheriViewModel) {
                             MultiViewCatalogBrowser(vis, UserRole.SELLER, filter, customization, { id, en -> vm.setSellerItemEnabled(id, en) }, { c, en -> vm.setCategoryEnabledForSeller(c, en) }, { editItem = it }, { _, _, _ -> }, {})
                         }
                         1 -> SellerLiveBoardQrScreen(prof, remember(rawSellerItems, prof) { vm.buildSellerShopBoardQrFrames() }, { v, p -> vm.updateShopUpi(v, p) }, { activeScanner = ActiveScanner.SELLER_SCAN_CART })
-                        2 -> SellerOpsHubScreen(profitReport, remember(rawSellerItems) { rawSellerItems.filter { it.isEnabledInShop } }, udhaarList, zReports, auditLogs, { t, a, n -> vm.recordExpense(t, a, n) }, { id, q, l, r -> vm.recordWaste(id, q, l, r) }, { id, q, c, n -> vm.recordStockInward(id, q, c, n) }, { al, ar, d, r, ex -> vm.upsertUdhaarCustomer(al, ar, d, r, ex) }, { o, c, n -> vm.recordCashZReport(o, c, n) }, { k, j -> vm.saveDraft(k, j) }, { k, cb -> vm.loadDraft(k, cb) }, { k -> vm.clearDraft(k) })
+                        2 -> if (scopedLock) AppLockGateScreen(vm.appLockManager) { vm.unlockApp(); vaultUnlocked = true } else SellerOpsHubScreen(profitReport, remember(rawSellerItems) { rawSellerItems.filter { it.isEnabledInShop } }, udhaarList, zReports, auditLogs, { t, a, n -> vm.recordExpense(t, a, n) }, { id, q, l, r -> vm.recordWaste(id, q, l, r) }, { id, q, c, n -> vm.recordStockInward(id, q, c, n) }, { al, ar, d, r, ex -> vm.upsertUdhaarCustomer(al, ar, d, r, ex) }, { o, c, n -> vm.recordCashZReport(o, c, n) }, { k, j -> vm.saveDraft(k, j) }, { k, cb -> vm.loadDraft(k, cb) }, { k -> vm.clearDraft(k) })
                     }
                 } else {
                     when (selectedTab) {
