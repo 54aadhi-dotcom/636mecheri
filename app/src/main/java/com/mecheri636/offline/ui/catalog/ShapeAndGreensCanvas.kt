@@ -57,8 +57,8 @@ fun ShapeCanvasIcon(
             "POD" -> {
                 val p = Path().apply {
                     moveTo(w * 0.22f, h * 0.78f)
-                    quadraticTo(w * 0.20f, h * 0.22f, w * 0.78f, h * 0.18f)
-                    quadraticTo(w * 0.80f, h * 0.72f, w * 0.22f, h * 0.78f)
+                    quadraticBezierTo(w * 0.20f, h * 0.22f, w * 0.78f, h * 0.18f)
+                    quadraticBezierTo(w * 0.80f, h * 0.72f, w * 0.22f, h * 0.78f)
                 }
                 drawPath(p, color = tint, style = stroke)
                 drawCircle(tint, w * 0.06f, Offset(w * 0.42f, h * 0.56f))
@@ -78,8 +78,8 @@ fun ShapeCanvasIcon(
             "LEAFY" -> {
                 val p = Path().apply {
                     moveTo(w * 0.20f, h * 0.82f)
-                    quadraticTo(w * 0.18f, h * 0.20f, w * 0.82f, h * 0.18f)
-                    quadraticTo(w * 0.80f, h * 0.80f, w * 0.20f, h * 0.82f)
+                    quadraticBezierTo(w * 0.18f, h * 0.20f, w * 0.82f, h * 0.18f)
+                    quadraticBezierTo(w * 0.80f, h * 0.80f, w * 0.20f, h * 0.82f)
                 }
                 drawPath(p, color = tint, style = stroke)
                 drawLine(tint, Offset(w * 0.22f, h * 0.80f), Offset(w * 0.72f, h * 0.28f), strokeWidth = w * 0.08f, cap = StrokeCap.Round)
