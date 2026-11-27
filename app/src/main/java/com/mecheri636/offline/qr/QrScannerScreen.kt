@@ -8,11 +8,10 @@ import android.content.pm.PackageManager
 import android.util.Size
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.annotation.OptIn
 import androidx.camera.core.Camera
 import androidx.camera.core.CameraSelector
-import androidx.camera.core.ExperimentalGetImage
 import androidx.camera.core.ImageAnalysis
+import androidx.camera.core.ImageProxy
 import androidx.camera.core.Preview
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
@@ -36,6 +35,7 @@ import com.google.zxing.MultiFormatReader
 import com.google.zxing.PlanarYUVLuminanceSource
 import com.google.zxing.common.HybridBinarizer
 import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicBoolean
 
 @Composable
 fun OfflineQrScannerScreen(
@@ -55,11 +55,17 @@ fun OfflineQrScannerScreen(
     var torchOn by remember { mutableStateOf(false) }
     var zoomVal by remember { mutableFloatStateOf(1.0f) }
     var camRef by remember { mutableStateOf<Camera?>(null) }
+    var cameraProviderRef by remember { mutableStateOf<ProcessCameraProvider?>(null) }
     var alertText by remember { mutableStateOf<String?>(null) }
     var upiInfo by remember { mutableStateOf<ParsedUpiPayment?>(null) }
     var statusMsg by remember { mutableStateOf("Align QR in frame (100% offline)") }
+    var frameProgress by remember { mutableStateOf<MultiFrameQrAssembler.Result.Progress?>(null) }
     var manualText by remember { mutableStateOf("") }
     var showManual by remember { mutableStateOf(false) }
+
+    val assembler = remember { MultiFrameQrAssembler() }
+    val analysisExecutor = remember { Executors.newSingleThreadExecutor() }
+    val isDisposed = remember { AtomicBoolean(false) }
 
     val reqCam = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
@@ -69,10 +75,25 @@ fun OfflineQrScannerScreen(
         if (!hasCam) reqCam.launch(Manifest.permission.CAMERA)
     }
     LaunchedEffect(torchOn, camRef) {
-        camRef?.cameraControl?.enableTorch(torchOn)
+        val cam = camRef ?: return@LaunchedEffect
+        if (cam.cameraInfo.hasFlashUnit()) {
+            runCatching { cam.cameraControl.enableTorch(torchOn) }
+        }
     }
     LaunchedEffect(zoomVal, camRef) {
-        camRef?.cameraControl?.setZoomRatio(zoomVal)
+        camRef?.let { runCatching { it.cameraControl.setZoomRatio(zoomVal) } }
+    }
+
+    // CameraX teardown safety: ALWAYS call unbindAll() BEFORE executor.shutdown().
+    DisposableEffect(lifecycleOwner) {
+        onDispose {
+            isDisposed.set(true)
+            runCatching { camRef?.cameraControl?.enableTorch(false) }
+            runCatching { cameraProviderRef?.unbindAll() }
+            camRef = null
+            cameraProviderRef = null
+            runCatching { analysisExecutor.shutdown() }
+        }
     }
 
     fun handleRaw(raw: String) {
@@ -80,11 +101,34 @@ fun OfflineQrScannerScreen(
             is QrFirewallVerdict.AllowedMecheri -> {
                 alertText = null
                 upiInfo = null
-                statusMsg = "Verified (${v.payload.length} chars)"
-                onQrComplete(v.payload)
+                when (val assembled = assembler.feed(v.payload)) {
+                    is MultiFrameQrAssembler.Result.Progress -> {
+                        frameProgress = assembled
+                        statusMsg = "Frame ${assembled.received} of ${assembled.total} — hold steady"
+                    }
+                    is MultiFrameQrAssembler.Result.Complete -> {
+                        frameProgress = null
+                        when (val finalVerdict = QrFirewall.inspect(assembled.fullPayload)) {
+                            is QrFirewallVerdict.AllowedMecheri -> {
+                                statusMsg = "Verified (${finalVerdict.payload.length} chars)"
+                                onQrComplete(finalVerdict.payload)
+                            }
+                            is QrFirewallVerdict.AllowedUpi -> {
+                                upiInfo = finalVerdict.upi
+                                statusMsg = "UPI: ${finalVerdict.upi.vpa}"
+                            }
+                            is QrFirewallVerdict.Blocked -> {
+                                alertText = "${finalVerdict.reason}: ${finalVerdict.preview}"
+                                statusMsg = "Blocked unsafe QR"
+                            }
+                        }
+                    }
+                }
             }
             is QrFirewallVerdict.AllowedUpi -> {
                 alertText = null
+                frameProgress = null
+                assembler.reset()
                 upiInfo = v.upi
                 statusMsg = "UPI: ${v.upi.vpa}"
             }
@@ -107,6 +151,32 @@ fun OfflineQrScannerScreen(
         ) {
             Text(title, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
             TextButton(onClick = onCancel) { Text("Close") }
+        }
+
+        frameProgress?.let { fp ->
+            Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.secondaryContainer)) {
+                Column(modifier = Modifier.fillMaxWidth().padding(10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            "Frame ${fp.received} of ${fp.total} / பிரேம் ${fp.received} / ${fp.total}",
+                            fontWeight = FontWeight.Bold
+                        )
+                        TextButton(onClick = {
+                            assembler.reset()
+                            frameProgress = null
+                            statusMsg = "Align QR in frame (100% offline)"
+                        }) { Text("Reset") }
+                    }
+                    LinearProgressIndicator(
+                        progress = { fp.received.toFloat() / fp.total.coerceAtLeast(1).toFloat() },
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
+            }
         }
 
         if (alertText != null) {
@@ -148,49 +218,60 @@ fun OfflineQrScannerScreen(
                     factory = { ctx ->
                         val pv = PreviewView(ctx)
                         val fut = ProcessCameraProvider.getInstance(ctx)
-                        val exec = Executors.newSingleThreadExecutor()
-val reader = MultiFormatReader().apply {
-  setHints(mapOf(DecodeHintType.POSSIBLE_FORMATS
-    to listOf(BarcodeFormat.QR_CODE)))
-}
-var lastMs = 0L
+                        val reader = MultiFormatReader().apply {
+                            setHints(mapOf(DecodeHintType.POSSIBLE_FORMATS to listOf(BarcodeFormat.QR_CODE)))
+                        }
+                        var reusableYuv = ByteArray(0)
+                        var lastMs = 0L
+                        var lastText = ""
+
                         fut.addListener({
-                            val prov = fut.get()
-                            val prev = Preview.Builder().build().also { it.setSurfaceProvider(pv.surfaceProvider) }
+                            if (isDisposed.get()) return@addListener
+                            val prov = runCatching { fut.get() }.getOrNull() ?: return@addListener
+                            cameraProviderRef = prov
+                            val prev = Preview.Builder().build().also {
+                                it.setSurfaceProvider(pv.surfaceProvider)
+                            }
+                            @Suppress("DEPRECATION")
                             val ana = ImageAnalysis.Builder()
                                 .setTargetResolution(Size(1280, 720))
                                 .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                                 .build().also { a ->
-  a.setAnalyzer(exec) { p ->
-    try {
-      val pl = p.planes[0]
-      val buf = pl.buffer
-      val rem = buf.remaining()
-      val rs = pl.rowStride
-      val b = ByteArray(maxOf(rem, rs * p.height))
-      buf.get(b, 0, rem)
-      val src = PlanarYUVLuminanceSource(
-        b, rs, p.height, 0, 0, p.width, p.height, false
-      )
-      val bin = BinaryBitmap(HybridBinarizer(src))
-      val txt = reader.decodeWithState(bin).text ?: ""
-      val now = System.currentTimeMillis()
-      if (txt.isNotBlank() && now - lastMs > 700L) {
-        lastMs = now
-        ContextCompat.getMainExecutor(ctx).execute {
-          handleRaw(txt)
-        }
-      }
-    } catch (_: Exception) {
-    } finally {
-      reader.reset()
-      p.close()
-    }
-  }
-}
+                                    a.setAnalyzer(analysisExecutor) { proxy ->
+                                        try {
+                                            if (isDisposed.get()) return@setAnalyzer
+                                            val plane = proxy.planes[0]
+                                            val w = proxy.width
+                                            val h = proxy.height
+                                            reusableYuv = extractLuminanceInto(plane, w, h, reusableYuv)
+                                            val src = PlanarYUVLuminanceSource(
+                                                reusableYuv, w, h, 0, 0, w, h, false
+                                            )
+                                            val bin = BinaryBitmap(HybridBinarizer(src))
+                                            val txt = reader.decodeWithState(bin).text ?: ""
+                                            val now = System.currentTimeMillis()
+                                            if (txt.isNotBlank() && (txt != lastText || now - lastMs > 700L)) {
+                                                lastText = txt
+                                                lastMs = now
+                                                ContextCompat.getMainExecutor(ctx).execute {
+                                                    if (!isDisposed.get()) handleRaw(txt)
+                                                }
+                                            }
+                                        } catch (_: Exception) {
+                                        } finally {
+                                            reader.reset()
+                                            proxy.close()
+                                        }
+                                    }
+                                }
                             runCatching {
                                 prov.unbindAll()
-                                camRef = prov.bindToLifecycle(lifecycleOwner, CameraSelector.DEFAULT_BACK_CAMERA, prev, ana)
+                                camRef = prov.bindToLifecycle(
+                                    lifecycleOwner,
+                                    CameraSelector.DEFAULT_BACK_CAMERA,
+                                    prev,
+                                    ana
+                                )
                             }
                         }, ContextCompat.getMainExecutor(ctx))
                         pv
@@ -201,14 +282,18 @@ var lastMs = 0L
                     shape = RoundedCornerShape(8.dp),
                     modifier = Modifier.align(Alignment.BottomCenter).padding(10.dp)
                 ) {
-                    Text(statusMsg, modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp), style = MaterialTheme.typography.bodySmall)
+                    Text(
+                        statusMsg,
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+                        style = MaterialTheme.typography.bodySmall
+                    )
                 }
             }
         }
 
         Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             OutlinedButton(onClick = { torchOn = !torchOn }, modifier = Modifier.weight(1f)) {
-                Text(if (torchOn) "Torch ON" else "Torch OFF")
+                Text(if (torchOn) "🔦 Torch ON" else "🔦 Torch OFF")
             }
             OutlinedButton(onClick = { zoomVal = if (zoomVal < 1.8f) 2.0f else 1.0f }, modifier = Modifier.weight(1f)) {
                 Text("Zoom ${zoomVal.toInt()}x")
@@ -232,4 +317,41 @@ var lastMs = 0L
             ) { Text("Verify & Process") }
         }
     }
+}
+
+private fun extractLuminanceInto(
+    plane: ImageProxy.PlaneProxy,
+    width: Int,
+    height: Int,
+    existing: ByteArray
+): ByteArray {
+    val size = width * height
+    val out = if (existing.size == size) existing else ByteArray(size)
+    val buf = plane.buffer
+    val rowStride = plane.rowStride
+    val pixelStride = plane.pixelStride
+    buf.rewind()
+    val limit = buf.limit()
+    if (pixelStride == 1 && rowStride == width && limit >= size) {
+        buf.get(out, 0, size)
+    } else if (pixelStride == 1) {
+        for (y in 0 until height) {
+            val rowStart = y * rowStride
+            if (rowStart >= limit) break
+            val copyLen = minOf(width, limit - rowStart)
+            buf.position(rowStart)
+            buf.get(out, y * width, copyLen)
+        }
+    } else {
+        for (y in 0 until height) {
+            val rowStart = y * rowStride
+            val outRow = y * width
+            for (x in 0 until width) {
+                val pos = rowStart + x * pixelStride
+                if (pos >= limit) break
+                out[outRow + x] = buf.get(pos)
+            }
+        }
+    }
+    return out
 }

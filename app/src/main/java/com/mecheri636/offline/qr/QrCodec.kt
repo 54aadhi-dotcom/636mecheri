@@ -6,9 +6,14 @@ import java.util.zip.Deflater
 import java.util.zip.Inflater
 
 object QrCodec {
-    private const val MAX_SINGLE_QR_CHARS = 560
+    private const val MAX_SINGLE_QR_CHARS = 640
     private const val MAX_DECOMPRESSED_BYTES = 65_536
-    private const val B85_ALPHABET =
+
+    // RFC 9285 Base45 alphabet (100% valid QR 5.5-bit Alphanumeric mode)
+    private const val B45_ALPHABET = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ \$%*+-./:"
+
+    // Retained ONLY for decoding legacy v1.0.3 Z1: QR codes (never used for encoding)
+    private const val LEGACY_B85_ALPHABET =
         "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz!#$%&()*+-;<=>?@^_`{|}~"
 
     data class SellerBoardPayload(
@@ -121,12 +126,22 @@ object QrCodec {
         }
     }
 
+    // Preserves plain C2 format so v1.0.3 sellers can always scan v2.0 buyer carts.
     fun encodeBuyerCart(cart: BuyerCartPayload): String {
-        val safeAlias = QrFirewall.sanitizeText(cart.buyerAlias, 24)
+        val safeAlias = QrFirewall.sanitizeText(cart.buyerAlias, 12)
         val nonce = cart.cartNonce.ifBlank { "${cart.epochMinutes}_${cart.items.size}" }
         val itemPart = cart.items.joinToString(",") { "${it.productId}:${it.qtyMilli}" }
         val raw = "C2|${cart.shopId}|$safeAlias|${cart.epochMinutes}|$nonce|$itemPart"
         return "$raw|${crc16Hex(raw)}"
+    }
+
+    // Optional Z2: Base45 encoder for very large buyer carts when needed.
+    fun encodeBuyerCartCompressed(cart: BuyerCartPayload): List<String> {
+        val safeAlias = QrFirewall.sanitizeText(cart.buyerAlias, 12)
+        val nonce = cart.cartNonce.ifBlank { "${cart.epochMinutes}_${cart.items.size}" }
+        val itemPart = cart.items.joinToString(",") { "${it.productId}:${it.qtyMilli}" }
+        val raw = "C2|${cart.shopId}|$safeAlias|${cart.epochMinutes}|$nonce|$itemPart"
+        return compressAndFrame(raw)
     }
 
     fun decodeBuyerCart(qrText: String): BuyerCartPayload {
@@ -201,16 +216,23 @@ object QrCodec {
             ReceiptLine(seg[0].toInt(), seg[1].toLong(), seg[2].toLong())
         }
 
+    // Uses Z2: RFC 9285 Base45 + session-ID multi-frame header (100% QR Alphanumeric mode).
     private fun compressAndFrame(raw: String): List<String> {
         val signed = "$raw|${crc16Hex(raw)}"
-        val compressed = "Z1:" + encodeBase85(zlibCompress(signed.toByteArray(Charsets.UTF_8)))
+        val compressed = "Z2:" + encodeBase45(zlibCompress(signed.toByteArray(Charsets.UTF_8)))
         if (compressed.length <= MAX_SINGLE_QR_CHARS) return listOf(compressed)
+        val sessionId = crc16Hex(compressed)
         val chunks = compressed.chunked(MAX_SINGLE_QR_CHARS)
-        return chunks.mapIndexed { idx, chunk -> "F${idx + 1}/${chunks.size}:$chunk" }
+        return chunks.mapIndexed { idx, chunk -> "F${idx + 1}/${chunks.size}/$sessionId:$chunk" }
     }
 
-    private fun unpackIfCompressed(text: String): String =
-        if (text.startsWith("Z1:")) zlibDecompress(decodeBase85(text.removePrefix("Z1:"))).toString(Charsets.UTF_8) else text
+    private fun unpackIfCompressed(text: String): String = when {
+        text.startsWith("Z2:") ->
+            zlibDecompress(decodeBase45(text.removePrefix("Z2:"))).toString(Charsets.UTF_8)
+        text.startsWith("Z1:") ->
+            zlibDecompress(decodeLegacyBase85(text.removePrefix("Z1:"))).toString(Charsets.UTF_8)
+        else -> text
+    }
 
     private fun verifyAndStripCrc(text: String): Pair<String, String> {
         val lastBar = text.lastIndexOf('|')
@@ -254,33 +276,74 @@ object QrCodec {
         return out.toByteArray()
     }
 
-    private fun encodeBase85(data: ByteArray): String {
-        val sb = StringBuilder((data.size * 5) / 4 + 4)
+    fun encodeBase45(data: ByteArray): String {
+        val sb = StringBuilder((data.size * 3) / 2 + 2)
         var i = 0
         while (i < data.size) {
-            val rem = data.size - i
-            var value = 0L
-            for (j in 0 until 4) value = (value shl 8) or (if (j < rem) (data[i + j].toInt() and 0xFF) else 0).toLong()
-            val chars = CharArray(5)
-            for (k in 4 downTo 0) { chars[k] = B85_ALPHABET[(value % 85L).toInt()]; value /= 85L }
-            sb.append(chars, 0, if (rem < 4) rem + 1 else 5)
-            i += 4
+            if (i + 1 < data.size) {
+                val v = ((data[i].toInt() and 0xFF) shl 8) or (data[i + 1].toInt() and 0xFF)
+                val e = v / 2025
+                val rem = v % 2025
+                val d = rem / 45
+                val c = rem % 45
+                sb.append(B45_ALPHABET[c]).append(B45_ALPHABET[d]).append(B45_ALPHABET[e])
+                i += 2
+            } else {
+                val v = data[i].toInt() and 0xFF
+                val d = v / 45
+                val c = v % 45
+                sb.append(B45_ALPHABET[c]).append(B45_ALPHABET[d])
+                i += 1
+            }
         }
         return sb.toString()
     }
 
-    private fun decodeBase85(encoded: String): ByteArray {
+    fun decodeBase45(encoded: String): ByteArray {
+        require(encoded.length % 3 != 1) { "Invalid Base45 length" }
+        val out = ByteArrayOutputStream((encoded.length * 2) / 3 + 1)
+        var i = 0
+        while (i < encoded.length) {
+            if (i + 2 < encoded.length) {
+                val c = B45_ALPHABET.indexOf(encoded[i])
+                val d = B45_ALPHABET.indexOf(encoded[i + 1])
+                val e = B45_ALPHABET.indexOf(encoded[i + 2])
+                require(c >= 0 && d >= 0 && e >= 0) { "Invalid Base45 char" }
+                val v = c + d * 45 + e * 2025
+                require(v <= 0xFFFF) { "Invalid Base45 3-char value" }
+                out.write((v shr 8) and 0xFF)
+                out.write(v and 0xFF)
+                i += 3
+            } else {
+                val c = B45_ALPHABET.indexOf(encoded[i])
+                val d = B45_ALPHABET.indexOf(encoded[i + 1])
+                require(c >= 0 && d >= 0) { "Invalid Base45 char" }
+                val v = c + d * 45
+                require(v <= 0xFF) { "Invalid Base45 2-char value" }
+                out.write(v and 0xFF)
+                i += 2
+            }
+        }
+        return out.toByteArray()
+    }
+
+    private fun decodeLegacyBase85(encoded: String): ByteArray {
         val out = ByteArrayOutputStream((encoded.length * 4) / 5)
         var i = 0
         while (i < encoded.length) {
             val rem = minOf(5, encoded.length - i)
             var value = 0L
             for (j in 0 until 5) {
-                val idx = if (j < rem) B85_ALPHABET.indexOf(encoded[i + j]) else 84
-                require(idx >= 0) { "Invalid Base85 char" }
+                val idx = if (j < rem) LEGACY_B85_ALPHABET.indexOf(encoded[i + j]) else 84
+                require(idx >= 0) { "Invalid legacy Base85 char" }
                 value = value * 85L + idx.toLong()
             }
-            val bytes = byteArrayOf(((value shr 24) and 0xFF).toByte(), ((value shr 16) and 0xFF).toByte(), ((value shr 8) and 0xFF).toByte(), (value and 0xFF).toByte())
+            val bytes = byteArrayOf(
+                ((value shr 24) and 0xFF).toByte(),
+                ((value shr 16) and 0xFF).toByte(),
+                ((value shr 8) and 0xFF).toByte(),
+                (value and 0xFF).toByte()
+            )
             out.write(bytes, 0, if (rem < 5) rem - 1 else 4)
             i += 5
         }
@@ -290,11 +353,18 @@ object QrCodec {
 
 class MultiFrameQrAssembler {
     private var expectedTotal = 0
+    private var activeSessionId = ""
     private var lastFrameMs = 0L
     private val collected = mutableMapOf<Int, String>()
 
     sealed class Result {
-        data class Progress(val received: Int, val total: Int, val receivedIndices: Set<Int> = emptySet()) : Result()
+        data class Progress(
+            val received: Int,
+            val total: Int,
+            val receivedIndices: Set<Int> = emptySet(),
+            val sessionId: String = ""
+        ) : Result()
+
         data class Complete(val fullPayload: String) : Result()
     }
 
@@ -302,21 +372,38 @@ class MultiFrameQrAssembler {
         val now = System.currentTimeMillis()
         if (lastFrameMs > 0L && (now - lastFrameMs) > 60_000L) reset()
         lastFrameMs = now
-        val match = Regex("^F(\\d{1,2})/(\\d{1,2}):(.*)$", RegexOption.DOT_MATCHES_ALL).matchEntire(rawQr)
-        if (match == null) { reset(); return Result.Complete(rawQr) }
+        val match = Regex("^F(\\d{1,2})/(\\d{1,2})(?:/([0-9A-Za-z]{2,8}))?:(.*)$", RegexOption.DOT_MATCHES_ALL)
+            .matchEntire(rawQr)
+        if (match == null) {
+            reset()
+            return Result.Complete(rawQr)
+        }
         val idx = match.groupValues[1].toInt()
         val total = match.groupValues[2].toInt()
-        if (total !in 1..20 || idx !in 1..total) { reset(); return Result.Complete(rawQr) }
-        if (total != expectedTotal) { collected.clear(); expectedTotal = total }
-        collected[idx] = match.groupValues[3]
+        val sessionId = match.groupValues[3]
+        if (total !in 1..20 || idx !in 1..total) {
+            reset()
+            return Result.Complete(rawQr)
+        }
+        if (total != expectedTotal || sessionId != activeSessionId) {
+            collected.clear()
+            expectedTotal = total
+            activeSessionId = sessionId
+        }
+        collected[idx] = match.groupValues[4]
         return if (collected.size == expectedTotal) {
             val merged = (1..expectedTotal).joinToString("") { collected[it].orEmpty() }
             reset()
             Result.Complete(merged)
         } else {
-            Result.Progress(collected.size, expectedTotal, collected.keys.toSet())
+            Result.Progress(collected.size, expectedTotal, collected.keys.toSet(), activeSessionId)
         }
     }
 
-    fun reset() { expectedTotal = 0; lastFrameMs = 0L; collected.clear() }
+    fun reset() {
+        expectedTotal = 0
+        activeSessionId = ""
+        lastFrameMs = 0L
+        collected.clear()
+    }
 }

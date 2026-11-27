@@ -19,10 +19,10 @@ sealed class QrFirewallVerdict {
 }
 
 object QrFirewall {
-    private const val MAX_QR_CHARS = 4096
+    private const val MAX_QR_CHARS = 8192
     private val VPA_REGEX = Regex("^[a-zA-Z0-9._-]{2,64}@[a-zA-Z0-9]{2,32}$")
-    private val FRAME_PREFIX = Regex("^F\\d{1,2}/\\d{1,2}:.*$", RegexOption.DOT_MATCHES_ALL)
-    private val MECHERI_PREFIXES = listOf("Z1:", "S1|", "S2|", "C1|", "C2|", "R1|", "R2|", "X1|", "B1|", "X3|")
+    private val FRAME_PREFIX = Regex("^F\\d{1,2}/\\d{1,2}(?:/[0-9A-Za-z]{2,8})?:.*$", RegexOption.DOT_MATCHES_ALL)
+    private val MECHERI_PREFIXES = listOf("Z2:", "Z1:", "S1|", "S2|", "C1|", "C2|", "R1|", "R2|", "X1|", "B1|", "X3|")
     private val BLOCKED_SCHEMES = listOf(
         "http://", "https://", "javascript:", "file://", "content://",
         "intent://", "tel:", "sms:", "smsto:", "mailto:", "market://", "data:", "ftp://"
@@ -31,7 +31,7 @@ object QrFirewall {
     fun inspect(rawInput: String): QrFirewallVerdict {
         if (rawInput.isBlank()) return QrFirewallVerdict.Blocked("Empty QR code", "")
         if (rawInput.length > MAX_QR_CHARS) {
-            return QrFirewallVerdict.Blocked("QR exceeds safe 4 KB limit", rawInput.take(32))
+            return QrFirewallVerdict.Blocked("QR exceeds safe 8 KB limit", rawInput.take(32))
         }
         val cleaned = rawInput.trim().filter { ch -> ch >= ' ' && ch != '\u007F' }
         val lower = cleaned.lowercase(Locale.US)
@@ -92,6 +92,7 @@ object QrFirewall {
 
     fun sanitizeText(text: String, maxLen: Int): String =
         text.replace("|", " ").replace("~", " ").replace(";", " ")
+            .replace(":", " ").replace(",", " ")
             .replace("\n", " ").replace("\r", " ")
             .filter { it >= ' ' && it != '\u007F' }
             .trim()
