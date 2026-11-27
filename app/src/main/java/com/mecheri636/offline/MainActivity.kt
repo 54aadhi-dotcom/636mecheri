@@ -43,6 +43,9 @@ fun MecheriRootApp(vm: MecheriViewModel) {
     val buyerCart by vm.activeBuyerCart.collectAsStateWithLifecycle()
     val buyerReceipts by vm.buyerReceipts.collectAsStateWithLifecycle()
     val profitReport by vm.profitReport.collectAsStateWithLifecycle()
+    val udhaarList by vm.customerUdhaar.collectAsStateWithLifecycle()
+    val zReports by vm.cashZReports.collectAsStateWithLifecycle()
+    val auditLogs by vm.auditLogs.collectAsStateWithLifecycle()
     val packingSummary by vm.packingSummary.collectAsStateWithLifecycle()
     val lastReceiptQr by vm.lastReceiptQr.collectAsStateWithLifecycle()
     val auditReport by vm.auditReport.collectAsStateWithLifecycle()
@@ -114,7 +117,7 @@ fun MecheriRootApp(vm: MecheriViewModel) {
                             MultiViewCatalogBrowser(vis, UserRole.SELLER, filter, customization, { id, en -> vm.setSellerItemEnabled(id, en) }, { c, en -> vm.setCategoryEnabledForSeller(c, en) }, { editItem = it }, { _, _, _ -> }, {})
                         }
                         1 -> SellerLiveBoardQrScreen(prof, remember(rawSellerItems, prof) { vm.buildSellerShopBoardQrFrames() }, { v, p -> vm.updateShopUpi(v, p) }, { activeScanner = ActiveScanner.SELLER_SCAN_CART })
-                        2 -> SellerBusinessOpsScreen(profitReport, remember(rawSellerItems) { rawSellerItems.filter { it.isEnabledInShop } }, { t, a, n -> vm.recordExpense(t, a, n) }, { id, q, l, r -> vm.recordWaste(id, q, l, r) }, { id, q, c, n -> vm.recordStockInward(id, q, c, n) })
+                        2 -> SellerOpsHubScreen(profitReport, remember(rawSellerItems) { rawSellerItems.filter { it.isEnabledInShop } }, udhaarList, zReports, auditLogs, { t, a, n -> vm.recordExpense(t, a, n) }, { id, q, l, r -> vm.recordWaste(id, q, l, r) }, { id, q, c, n -> vm.recordStockInward(id, q, c, n) }, { al, ar, d, r, ex -> vm.upsertUdhaarCustomer(al, ar, d, r, ex) }, { o, c, n -> vm.recordCashZReport(o, c, n) }, { k, j -> vm.saveDraft(k, j) }, { k, cb -> vm.loadDraft(k, cb) }, { k -> vm.clearDraft(k) })
                     }
                 } else {
                     when (selectedTab) {
