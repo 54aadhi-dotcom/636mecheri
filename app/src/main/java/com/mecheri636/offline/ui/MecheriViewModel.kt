@@ -45,6 +45,7 @@ class MecheriViewModel(application: Application) : AndroidViewModel(application)
     val isLocked = _isLocked.asStateFlow()
     private val st = SharingStarted.WhileSubscribed(5000)
     val sellerProfile = dao.observeSellerProfile().stateIn(viewModelScope, st, null)
+    val buyerProfile = dao.observeBuyerProfile().stateIn(viewModelScope, st, null)
     val rawSellerCatalog = dao.observeSellerCatalog().stateIn(viewModelScope, st, emptyList())
     val savedShops = dao.observeBuyerSavedShops().stateIn(viewModelScope, st, emptyList())
     val buyerHiddenIds = dao.observeBuyerHiddenIds().map { it.toSet() }.stateIn(viewModelScope, st, emptySet())
@@ -67,7 +68,13 @@ class MecheriViewModel(application: Application) : AndroidViewModel(application)
 
     init {
         viewModelScope.launch {
-            dao.insertMasterProducts(MasterCatalogSeeder.allFixedProducts())
+            val fixedProducts = MasterCatalogSeeder.allFixedProducts()
+            dao.insertMasterProducts(fixedProducts)
+            if (!prefs.getBoolean("catalog_meta_v3_done", false)) {
+                dao.hydrateMasterMetadataV3(fixedProducts)
+                prefs.edit().putBoolean("catalog_meta_v3_done", true).apply()
+            }
+            dao.insertDefaultBuyerProfileIfMissing(System.currentTimeMillis())
             dao.initializeAllHiddenForSeller()
             refreshOfflineAudit()
         }
@@ -94,7 +101,24 @@ class MecheriViewModel(application: Application) : AndroidViewModel(application)
             val sid = ex?.shopId ?: "MCH${Random.nextInt(1000, 9999)}"
             val vpa = upiVpa.trim().ifBlank { ex?.upiVpa.orEmpty() }
             val pay = upiPayeeName.trim().ifBlank { ex?.upiPayeeName.orEmpty().ifBlank { name } }
-            dao.saveSellerProfile(SellerProfileEntity(1, sid, name, area.ifBlank { "Mecheri" }, ex?.pinHash, ex?.createdAt ?: System.currentTimeMillis(), vpa, pay, ex?.upiStaticRaw.orEmpty()))
+            dao.saveSellerProfile(
+                SellerProfileEntity(
+                    id = 1,
+                    shopId = sid,
+                    shopName = name,
+                    shopArea = area.ifBlank { "Mecheri" },
+                    pinHash = ex?.pinHash,
+                    createdAt = ex?.createdAt ?: System.currentTimeMillis(),
+                    upiVpa = vpa,
+                    upiPayeeName = pay,
+                    upiStaticRaw = ex?.upiStaticRaw.orEmpty(),
+                    strictStockMode = ex?.strictStockMode ?: false,
+                    shopType = ex?.shopType ?: "PRODUCE",
+                    openingCashFloatPaise = ex?.openingCashFloatPaise ?: 0L,
+                    lastOrderSeq = ex?.lastOrderSeq ?: 0,
+                    lastBackupEpochMs = ex?.lastBackupEpochMs ?: 0L
+                )
+            )
             dao.initializeAllHiddenForSeller()
             _statusMessage.value = "Shop '$name' saved."
         }
@@ -146,7 +170,9 @@ class MecheriViewModel(application: Application) : AndroidViewModel(application)
         val sum = _packingSummary.value ?: return; val p = sellerProfile.value ?: return
         if (sum.isWrongShop || sum.activeBillPaise <= 0L) return
         viewModelScope.launch {
-            val now = System.currentTimeMillis(); val code = "ORD%04d".format(dao.getTotalOrderCount() + 1)
+            val now = System.currentTimeMillis()
+            val nextSeq = maxOf(p.lastOrderSeq, dao.getTotalOrderCount()) + 1
+            val code = "ORD%04d".format(nextSeq)
             val lines = sum.lines.filter { it.status != LineStatus.SOLD_OUT_OR_HIDDEN && it.qtyMilli > 0L }
             val orig = sum.activeBillPaise; var cashP = 0L; var upiP = 0L
             var collP = collectedRs?.let { (it * 100.0).roundToLong().coerceAtLeast(0L) } ?: orig
@@ -163,6 +189,7 @@ class MecheriViewModel(application: Application) : AndroidViewModel(application)
             val ord = SellerOrderEntity(receiptCode = code, buyerAlias = sum.buyerAlias, totalPaise = orig, cogsPaise = sum.totalCogsPaise, itemCount = lines.size, createdAt = now, originalTotalPaise = orig, collectedPaise = collP, cashPaise = cashP, upiPaise = upiP, variancePaise = varP, varianceReason = rsn, paymentStatus = pStat, paymentMode = payMode, utrNote = utr.trim().take(40), cartNonce = activeCartNonce)
             val items = lines.map { SellerOrderItemEntity(0L, 0L, it.productId, it.qtyMilli, it.liveUnitPricePaise, it.lineTotalPaise, it.nameEn, sMap[it.productId]?.costPricePaise ?: 0L, it.isFreebie, 0L) }
             if (dao.commitSaleAtomically(ord, items, now) == -1L) { _statusMessage.value = "Duplicate Cart QR!"; return@launch }
+            dao.updateLastOrderSeq(nextSeq)
             dao.insertAuditLog(AuditLogEntity(actionType = "SALE", refId = code, summary = "$payMode/$rsn", deltaPaise = collP, createdAt = now))
             _lastReceiptQr.value = QrCodec.encodeReceipt(QrCodec.ReceiptPayload(p.shopId, code, now / 60000L, orig, lines.map { QrCodec.ReceiptLine(it.productId, it.qtyMilli, it.liveUnitPricePaise) }, orig, collP, rsn, payMode))
             _statusMessage.value = "Order $code saved (${CatalogFilterEngine.formatRs(collP)})"
@@ -179,6 +206,7 @@ class MecheriViewModel(application: Application) : AndroidViewModel(application)
         val p = (amtRs * 100).roundToLong(); if (p <= 0L) return@launch
         val now = System.currentTimeMillis()
         dao.insertExpense(SellerExpenseEntity(expenseType = type, amountPaise = p, note = note, createdAt = now))
+        dao.insertShopExpense(ShopExpenseEntity(epochMs = now, category = type, note = note, amountPaise = p, isCash = true))
         dao.insertAuditLog(AuditLogEntity(actionType = "EXPENSE", refId = type, summary = note.ifBlank { type }, deltaPaise = -p, createdAt = now))
         _statusMessage.value = "Expense saved: ${CatalogFilterEngine.formatRs(p)}"
     }
@@ -194,7 +222,7 @@ class MecheriViewModel(application: Application) : AndroidViewModel(application)
         viewModelScope.launch {
             val now = System.currentTimeMillis(); val dP = (deltaRs * 100).roundToLong()
             val bal = ((ex?.balancePaise ?: 0L) + dP).coerceAtLeast(0L)
-            dao.upsertCustomerUdhaar(CustomerUdhaarEntity(ex?.customerId ?: 0L, clean, area.trim(), bal, risk, now))
+            dao.upsertCustomerUdhaar(CustomerUdhaarEntity(ex?.customerId ?: 0L, clean, area.trim(), bal, risk, now, ex?.isArchived ?: false))
             dao.insertAuditLog(AuditLogEntity(actionType = "UDHAAR", refId = clean, summary = "Bal ${CatalogFilterEngine.formatRs(bal)}", deltaPaise = dP, createdAt = now))
             _statusMessage.value = "Udhaar: $clean (${CatalogFilterEngine.formatRs(bal)})"
         }
@@ -239,8 +267,9 @@ class MecheriViewModel(application: Application) : AndroidViewModel(application)
     }
     fun buildBuyerCartQr(): String? {
         val sid = _selectedBuyerShopId.value ?: return null; val c = activeBuyerCart.value; if (c.isEmpty()) return null
+        val alias = buyerProfile.value?.buyerAlias?.ifBlank { "B636" } ?: "B636"
         val m = System.currentTimeMillis() / 60000L; val h = c.sumOf { it.productId * 31 + it.qtyMilli.toInt() } and 0xFFFF
-        return QrCodec.encodeBuyerCart(QrCodec.BuyerCartPayload(sid, "B636", m, c.map { QrCodec.CartLine(it.productId, it.qtyMilli) }, "${m}_$h"))
+        return QrCodec.encodeBuyerCart(QrCodec.BuyerCartPayload(sid, alias, m, c.map { QrCodec.CartLine(it.productId, it.qtyMilli) }, "${m}_$h"))
     }
     fun handleScannedReceiptQr(qrText: String) = viewModelScope.launch {
         try {

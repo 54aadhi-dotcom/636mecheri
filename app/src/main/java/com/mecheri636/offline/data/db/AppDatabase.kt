@@ -25,9 +25,12 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         DraftStateEntity::class,
         AuditLogEntity::class,
         CustomerUdhaarEntity::class,
-        CashZReportEntity::class
+        CashZReportEntity::class,
+        PosDraftEntity::class,
+        BuyerProfileEntity::class,
+        ShopExpenseEntity::class
     ],
-    version = 2,
+    version = 3,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -98,6 +101,85 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        val MIGRATION_2_3 = object : Migration(2, 3) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE master_products ADD COLUMN shape_code TEXT NOT NULL DEFAULT 'ROUND'")
+                db.execSQL("ALTER TABLE master_products ADD COLUMN color_code TEXT NOT NULL DEFAULT 'GREEN'")
+                db.execSQL("ALTER TABLE master_products ADD COLUMN size_rank INTEGER NOT NULL DEFAULT 2")
+                db.execSQL("ALTER TABLE master_products ADD COLUMN weight_rank INTEGER NOT NULL DEFAULT 2")
+                db.execSQL("ALTER TABLE master_products ADD COLUMN search_keywords TEXT NOT NULL DEFAULT ''")
+                db.execSQL("ALTER TABLE master_products ADD COLUMN is_perishable INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("ALTER TABLE master_products ADD COLUMN def_bundle_milli INTEGER NOT NULL DEFAULT 250")
+                db.execSQL("ALTER TABLE master_products ADD COLUMN unit_step_mode TEXT NOT NULL DEFAULT 'WEIGHT_GRAMS'")
+                db.execSQL("ALTER TABLE master_products ADD COLUMN is_archived INTEGER NOT NULL DEFAULT 0")
+
+                db.execSQL("ALTER TABLE seller_profile ADD COLUMN strict_stock_mode INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("ALTER TABLE seller_profile ADD COLUMN shop_type TEXT NOT NULL DEFAULT 'PRODUCE'")
+                db.execSQL("ALTER TABLE seller_profile ADD COLUMN opening_cash_float_paise INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("ALTER TABLE seller_profile ADD COLUMN last_order_seq INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("ALTER TABLE seller_profile ADD COLUMN last_backup_epoch_ms INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("UPDATE seller_profile SET last_order_seq = (SELECT COUNT(*) FROM seller_orders)")
+
+                db.execSQL("ALTER TABLE seller_orders ADD COLUMN order_status TEXT NOT NULL DEFAULT 'COMPLETED'")
+                db.execSQL("ALTER TABLE seller_orders ADD COLUMN round_off_paise INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("ALTER TABLE seller_orders ADD COLUMN utr_last4 TEXT NOT NULL DEFAULT ''")
+                db.execSQL("ALTER TABLE seller_orders ADD COLUMN customer_id INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("UPDATE seller_orders SET order_status = 'VOIDED' WHERE payment_status = 'VOID'")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_seller_orders_order_status ON seller_orders (order_status)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_seller_orders_customer_id ON seller_orders (customer_id)")
+
+                db.execSQL("ALTER TABLE customer_udhaar ADD COLUMN is_archived INTEGER NOT NULL DEFAULT 0")
+
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `pos_drafts` (
+                        `id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                        `slot_id` TEXT NOT NULL,
+                        `product_id` INTEGER NOT NULL,
+                        `custom_label` TEXT NOT NULL,
+                        `qty_milli` INTEGER NOT NULL,
+                        `unit_price_paise` INTEGER NOT NULL,
+                        `override_line_total_paise` INTEGER,
+                        `updated_at` INTEGER NOT NULL
+                    )
+                    """.trimIndent()
+                )
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_pos_drafts_slot_id ON pos_drafts (slot_id)")
+
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `buyer_profile` (
+                        `id` INTEGER NOT NULL,
+                        `buyer_alias` TEXT NOT NULL,
+                        `monthly_budget_paise` INTEGER NOT NULL,
+                        `updated_at` INTEGER NOT NULL,
+                        PRIMARY KEY(`id`)
+                    )
+                    """.trimIndent()
+                )
+
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `shop_expenses` (
+                        `expense_id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                        `epoch_ms` INTEGER NOT NULL,
+                        `category` TEXT NOT NULL,
+                        `note` TEXT NOT NULL,
+                        `amount_paise` INTEGER NOT NULL,
+                        `is_cash` INTEGER NOT NULL
+                    )
+                    """.trimIndent()
+                )
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_shop_expenses_epoch_ms ON shop_expenses (epoch_ms)")
+                db.execSQL(
+                    """
+                    INSERT INTO `shop_expenses` (`epoch_ms`, `category`, `note`, `amount_paise`, `is_cash`)
+                    SELECT `created_at`, `expense_type`, `note`, `amount_paise`, 1 FROM `seller_expenses`
+                    """.trimIndent()
+                )
+            }
+        }
+
         fun getInstance(context: Context): AppDatabase {
             return INSTANCE ?: synchronized(this) {
                 INSTANCE ?: Room.databaseBuilder(
@@ -105,7 +187,7 @@ abstract class AppDatabase : RoomDatabase() {
                     AppDatabase::class.java,
                     DB_NAME
                 )
-                    .addMigrations(MIGRATION_1_2)
+                    .addMigrations(MIGRATION_1_2, MIGRATION_2_3)
                     .setJournalMode(JournalMode.WRITE_AHEAD_LOGGING)
                     .build()
                     .also { INSTANCE = it }

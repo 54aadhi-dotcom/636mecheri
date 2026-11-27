@@ -44,7 +44,49 @@ interface CatalogDao {
     @Insert(onConflict = OnConflictStrategy.IGNORE)
     suspend fun insertMasterProducts(items: List<MasterProductEntity>)
 
-    @Query("SELECT * FROM master_products ORDER BY product_id ASC")
+    @Query(
+        """
+        UPDATE master_products
+        SET shape_code = :shapeCode, color_code = :colorCode,
+            size_rank = :sizeRank, weight_rank = :weightRank,
+            search_keywords = :searchKeywords, is_perishable = :isPerishable,
+            def_bundle_milli = :defBundleMilli, unit_step_mode = :unitStepMode
+        WHERE product_id = :productId
+        """
+    )
+    suspend fun updateMasterProductMeta(
+        productId: Int,
+        shapeCode: String,
+        colorCode: String,
+        sizeRank: Int,
+        weightRank: Int,
+        searchKeywords: String,
+        isPerishable: Boolean,
+        defBundleMilli: Long,
+        unitStepMode: String
+    )
+
+    @Transaction
+    suspend fun hydrateMasterMetadataV3(items: List<MasterProductEntity>) {
+        items.forEach { m ->
+            updateMasterProductMeta(
+                productId = m.productId,
+                shapeCode = m.shapeCode,
+                colorCode = m.colorCode,
+                sizeRank = m.sizeRank,
+                weightRank = m.weightRank,
+                searchKeywords = m.searchKeywords,
+                isPerishable = m.isPerishable,
+                defBundleMilli = m.defBundleMilli,
+                unitStepMode = m.unitStepMode
+            )
+        }
+    }
+
+    @Query("UPDATE master_products SET is_archived = :archived WHERE product_id = :productId")
+    suspend fun setMasterProductArchived(productId: Int, archived: Boolean)
+
+    @Query("SELECT * FROM master_products WHERE is_archived = 0 ORDER BY product_id ASC")
     suspend fun getAllMasterProducts(): List<MasterProductEntity>
 
     @Query("SELECT * FROM seller_profile WHERE id = 1")
@@ -55,6 +97,18 @@ interface CatalogDao {
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun saveSellerProfile(profile: SellerProfileEntity)
+
+    @Query("UPDATE seller_profile SET last_backup_epoch_ms = :epochMs WHERE id = 1")
+    suspend fun updateLastBackupEpochMs(epochMs: Long)
+
+    @Query("UPDATE seller_profile SET last_order_seq = :seq WHERE id = 1")
+    suspend fun updateLastOrderSeq(seq: Int)
+
+    @Query("UPDATE seller_profile SET strict_stock_mode = :strict WHERE id = 1")
+    suspend fun updateStrictStockMode(strict: Boolean)
+
+    @Query("UPDATE seller_profile SET opening_cash_float_paise = :floatPaise WHERE id = 1")
+    suspend fun updateOpeningCashFloat(floatPaise: Long)
 
     @Query(
         """
@@ -193,9 +247,15 @@ interface CatalogDao {
                s.updated_at AS updatedAt, 0 AS buyerCartQtyMilli,
                s.bulk_min_qty_milli AS bulkMinQtyMilli, s.bulk_price_paise AS bulkPricePaise,
                s.min_order_milli AS minOrderMilli, s.step_qty_milli AS stepQtyMilli,
-               s.variety_tag AS varietyTag
+               s.variety_tag AS varietyTag,
+               m.shape_code AS shapeCode, m.color_code AS colorCode,
+               m.size_rank AS sizeRank, m.weight_rank AS weightRank,
+               m.search_keywords AS searchKeywords, m.is_perishable AS isPerishable,
+               m.def_bundle_milli AS defBundleMilli, m.unit_step_mode AS unitStepMode,
+               m.is_archived AS isArchived
         FROM master_products m
         INNER JOIN seller_shop_items s ON m.product_id = s.product_id
+        WHERE m.is_archived = 0
         ORDER BY m.product_id ASC
         """
     )
@@ -314,9 +374,55 @@ interface CatalogDao {
     suspend fun getTotalOrderCount(): Int
 
     @Insert(onConflict = OnConflictStrategy.REPLACE) suspend fun upsertCustomerUdhaar(customer: CustomerUdhaarEntity): Long
-    @Query("SELECT * FROM customer_udhaar ORDER BY balance_paise DESC, updated_at DESC") fun observeCustomerUdhaar(): Flow<List<CustomerUdhaarEntity>>
+    @Query("SELECT * FROM customer_udhaar WHERE is_archived = 0 ORDER BY balance_paise DESC, updated_at DESC") fun observeCustomerUdhaar(): Flow<List<CustomerUdhaarEntity>>
+    @Query("UPDATE customer_udhaar SET is_archived = :archived WHERE customer_id = :customerId") suspend fun setUdhaarCustomerArchived(customerId: Long, archived: Boolean)
     @Insert suspend fun insertCashZReport(report: CashZReportEntity)
     @Query("SELECT * FROM cash_z_reports ORDER BY created_at DESC LIMIT 60") fun observeCashZReports(): Flow<List<CashZReportEntity>>
+
+    @Query("SELECT * FROM pos_drafts WHERE slot_id = :slotId ORDER BY id ASC")
+    fun observePosDraftsForSlot(slotId: String): Flow<List<PosDraftEntity>>
+
+    @Query("SELECT * FROM pos_drafts WHERE slot_id = :slotId ORDER BY id ASC")
+    suspend fun getPosDraftsForSlotOnce(slotId: String): List<PosDraftEntity>
+
+    @Query("SELECT * FROM pos_drafts ORDER BY slot_id ASC, id ASC")
+    fun observeAllPosDrafts(): Flow<List<PosDraftEntity>>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsertPosDraft(row: PosDraftEntity): Long
+
+    @Query("DELETE FROM pos_drafts WHERE id = :id")
+    suspend fun deletePosDraftById(id: Long)
+
+    @Query("DELETE FROM pos_drafts WHERE slot_id = :slotId")
+    suspend fun clearPosDraftSlot(slotId: String)
+
+    @Query("SELECT * FROM buyer_profile WHERE id = 1")
+    fun observeBuyerProfile(): Flow<BuyerProfileEntity?>
+
+    @Query("SELECT * FROM buyer_profile WHERE id = 1")
+    suspend fun getBuyerProfileOnce(): BuyerProfileEntity?
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsertBuyerProfile(profile: BuyerProfileEntity)
+
+    @Query("INSERT OR IGNORE INTO buyer_profile (id, buyer_alias, monthly_budget_paise, updated_at) VALUES (1, 'B636', 0, :now)")
+    suspend fun insertDefaultBuyerProfileIfMissing(now: Long)
+
+    @Insert
+    suspend fun insertShopExpense(expense: ShopExpenseEntity): Long
+
+    @Query("SELECT * FROM shop_expenses ORDER BY epoch_ms DESC LIMIT 200")
+    fun observeRecentShopExpenses(): Flow<List<ShopExpenseEntity>>
+
+    @Query("SELECT * FROM shop_expenses WHERE epoch_ms BETWEEN :startMs AND :endMs ORDER BY epoch_ms DESC")
+    fun observeShopExpensesBetween(startMs: Long, endMs: Long): Flow<List<ShopExpenseEntity>>
+
+    @Query("SELECT COALESCE(SUM(amount_paise), 0) FROM shop_expenses WHERE epoch_ms BETWEEN :startMs AND :endMs")
+    suspend fun sumShopExpensesBetween(startMs: Long, endMs: Long): Long
+
+    @Query("SELECT COALESCE(SUM(amount_paise), 0) FROM shop_expenses WHERE is_cash = 1 AND epoch_ms BETWEEN :startMs AND :endMs")
+    suspend fun sumCashShopExpensesBetween(startMs: Long, endMs: Long): Long
 
     @Query("SELECT * FROM buyer_saved_shops ORDER BY is_favorite DESC, last_synced_at DESC")
     fun observeBuyerSavedShops(): Flow<List<BuyerSavedShopEntity>>
@@ -342,11 +448,17 @@ interface CatalogDao {
                COALESCE(c.qty_milli, 0) AS buyerCartQtyMilli,
                p.bulk_min_qty_milli AS bulkMinQtyMilli, p.bulk_price_paise AS bulkPricePaise,
                p.min_order_milli AS minOrderMilli, p.step_qty_milli AS stepQtyMilli,
-               p.variety_tag AS varietyTag
+               p.variety_tag AS varietyTag,
+               m.shape_code AS shapeCode, m.color_code AS colorCode,
+               m.size_rank AS sizeRank, m.weight_rank AS weightRank,
+               m.search_keywords AS searchKeywords, m.is_perishable AS isPerishable,
+               m.def_bundle_milli AS defBundleMilli, m.unit_step_mode AS unitStepMode,
+               m.is_archived AS isArchived
         FROM buyer_shop_prices p
         INNER JOIN master_products m ON m.product_id = p.product_id
         LEFT JOIN buyer_cart_items c ON c.shop_id = p.shop_id AND c.product_id = p.product_id
         WHERE p.shop_id = :shopId
+          AND m.is_archived = 0
           AND (:hidePersonal = 0 OR m.product_id NOT IN (SELECT product_id FROM buyer_hidden_products))
         ORDER BY m.product_id ASC
         """
