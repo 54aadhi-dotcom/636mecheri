@@ -20,7 +20,8 @@ data class LockConfig(
     val shuffleKeypad: Boolean,
     val hidePatternLine: Boolean,
     val flagSecureEnabled: Boolean,
-    val timeoutMs: Long
+    val timeoutMs: Long,
+    val staffModeEnabled: Boolean = false
 )
 
 sealed class VerifyResult {
@@ -41,6 +42,8 @@ class AppLockManager(private val context: Context) {
         private const val K_HIDE_PAT = "lock_hide_pat"
         private const val K_FLAG_SEC = "lock_flag_sec"
         private const val K_TIMEOUT = "lock_timeout_ms"
+        private const val K_STAFF = "lock_staff_mode"
+        private const val K_EXT_SWITCH = "ext_switch_elapsed"
         private const val K_SALT = "sec_salt"
         private const val K_HASH = "sec_hash"
         private const val K_KDF = "sec_kdf"
@@ -51,6 +54,7 @@ class AppLockManager(private val context: Context) {
         private const val K_LOCK_WALL = "lock_until_wall"
         private const val K_LOCK_DUR = "lock_dur_ms"
         private const val ITERATIONS = 100_000
+        private const val GRACE_PERIOD_MS = 30_000L
         private const val RECOVERY_CHARS = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
     }
 
@@ -61,21 +65,16 @@ class AppLockManager(private val context: Context) {
         shuffleKeypad = prefs.getBoolean(K_SHUFFLE, true),
         hidePatternLine = prefs.getBoolean(K_HIDE_PAT, false),
         flagSecureEnabled = prefs.getBoolean(K_FLAG_SEC, true),
-        timeoutMs = prefs.getLong(K_TIMEOUT, 30_000L)
+        timeoutMs = prefs.getLong(K_TIMEOUT, 30_000L),
+        staffModeEnabled = prefs.getBoolean(K_STAFF, false)
     )
 
     fun isLockEnabled(): Boolean = getConfig().type != LockType.NONE && !prefs.getString(K_HASH, null).isNullOrEmpty()
 
     fun hasBiometricHardware(): Boolean =
-        Build.VERSION.SDK_INT >= 28 &&
-            context.packageManager.hasSystemFeature(PackageManager.FEATURE_FINGERPRINT)
+        Build.VERSION.SDK_INT >= 28 && context.packageManager.hasSystemFeature(PackageManager.FEATURE_FINGERPRINT)
 
-    fun setupLock(
-        type: LockType,
-        secret: CharArray,
-        scope: LockScope = LockScope.FULL_APP,
-        biometricEnabled: Boolean = false
-    ): String {
+    fun setupLock(type: LockType, secret: CharArray, scope: LockScope = LockScope.FULL_APP, biometricEnabled: Boolean = false): String {
         require(type != LockType.NONE) { "Select PIN, Pattern, or Passphrase" }
         require(secret.size >= 4) { "Secret must be at least 4 characters/dots" }
         val kdf = if (Build.VERSION.SDK_INT >= 26) "PBKDF2WithHmacSHA256" else "PBKDF2WithHmacSHA1"
@@ -85,18 +84,11 @@ class AppLockManager(private val context: Context) {
         val recSalt = ByteArray(16).also(rng::nextBytes)
         val recHash = hashSecret(normalizeRecovery(recoveryCode).toCharArray(), recSalt, kdf)
         prefs.edit()
-            .putString(K_TYPE, type.name)
-            .putString(K_SCOPE, scope.name)
+            .putString(K_TYPE, type.name).putString(K_SCOPE, scope.name)
             .putBoolean(K_BIO, biometricEnabled && hasBiometricHardware())
-            .putString(K_KDF, kdf)
-            .putString(K_SALT, b64(secSalt))
-            .putString(K_HASH, b64(secHash))
-            .putString(K_REC_SALT, b64(recSalt))
-            .putString(K_REC_HASH, b64(recHash))
-            .putInt(K_FAILS, 0)
-            .putLong(K_LOCK_ELAPSED, 0L)
-            .putLong(K_LOCK_WALL, 0L)
-            .putLong(K_LOCK_DUR, 0L)
+            .putString(K_KDF, kdf).putString(K_SALT, b64(secSalt)).putString(K_HASH, b64(secHash))
+            .putString(K_REC_SALT, b64(recSalt)).putString(K_REC_HASH, b64(recHash))
+            .putInt(K_FAILS, 0).putLong(K_LOCK_ELAPSED, 0L).putLong(K_LOCK_WALL, 0L).putLong(K_LOCK_DUR, 0L)
             .apply()
         return recoveryCode
     }
@@ -107,7 +99,8 @@ class AppLockManager(private val context: Context) {
         shuffleKeypad: Boolean = getConfig().shuffleKeypad,
         hidePatternLine: Boolean = getConfig().hidePatternLine,
         flagSecureEnabled: Boolean = getConfig().flagSecureEnabled,
-        timeoutMs: Long = getConfig().timeoutMs
+        timeoutMs: Long = getConfig().timeoutMs,
+        staffModeEnabled: Boolean = getConfig().staffModeEnabled
     ) {
         prefs.edit()
             .putString(K_SCOPE, scope.name)
@@ -116,15 +109,20 @@ class AppLockManager(private val context: Context) {
             .putBoolean(K_HIDE_PAT, hidePatternLine)
             .putBoolean(K_FLAG_SEC, flagSecureEnabled)
             .putLong(K_TIMEOUT, timeoutMs.coerceAtLeast(0L))
+            .putBoolean(K_STAFF, staffModeEnabled)
             .apply()
     }
 
     fun disableLock() {
         prefs.edit()
-            .putString(K_TYPE, LockType.NONE.name)
+            .putString(K_TYPE, LockType.NONE.name).putBoolean(K_STAFF, false).putLong(K_EXT_SWITCH, 0L)
             .remove(K_SALT).remove(K_HASH).remove(K_REC_SALT).remove(K_REC_HASH)
             .putInt(K_FAILS, 0).putLong(K_LOCK_ELAPSED, 0L).putLong(K_LOCK_WALL, 0L).putLong(K_LOCK_DUR, 0L)
             .apply()
+    }
+
+    fun markExternalAppSwitch() {
+        prefs.edit().putLong(K_EXT_SWITCH, SystemClock.elapsedRealtime()).apply()
     }
 
     fun remainingLockoutMs(): Long {
@@ -143,12 +141,7 @@ class AppLockManager(private val context: Context) {
         val expected = prefs.getString(K_HASH, null)?.let(::unb64) ?: return VerifyResult.Success
         val kdf = prefs.getString(K_KDF, "PBKDF2WithHmacSHA256") ?: "PBKDF2WithHmacSHA256"
         val actual = hashSecret(input, salt, kdf)
-        return if (MessageDigest.isEqual(expected, actual)) {
-            clearFailures()
-            VerifyResult.Success
-        } else {
-            recordFailure()
-        }
+        return if (MessageDigest.isEqual(expected, actual)) { clearFailures(); VerifyResult.Success } else recordFailure()
     }
 
     fun verifyRecoveryAndReset(codeInput: String): Boolean {
@@ -156,35 +149,33 @@ class AppLockManager(private val context: Context) {
         val expected = prefs.getString(K_REC_HASH, null)?.let(::unb64) ?: return false
         val kdf = prefs.getString(K_KDF, "PBKDF2WithHmacSHA256") ?: "PBKDF2WithHmacSHA256"
         val actual = hashSecret(normalizeRecovery(codeInput).toCharArray(), salt, kdf)
-        return if (MessageDigest.isEqual(expected, actual)) {
-            disableLock()
-            true
-        } else {
-            false
-        }
+        return if (MessageDigest.isEqual(expected, actual)) { disableLock(); true } else false
     }
 
+    // 30-second GPay/SMS app-switch grace period is STRICTLY ignored if Auto Lock = 0s (Immediate).
     fun shouldLockAfterBackground(lastActiveElapsedMs: Long): Boolean {
         if (!isLockEnabled()) return false
         val cfg = getConfig()
-        if (cfg.timeoutMs == 0L) return true
-        return (SystemClock.elapsedRealtime() - lastActiveElapsedMs) >= cfg.timeoutMs
+        val now = SystemClock.elapsedRealtime()
+        if (cfg.timeoutMs == 0L) {
+            prefs.edit().putLong(K_EXT_SWITCH, 0L).apply()
+            return true
+        }
+        val extSwitchMs = prefs.getLong(K_EXT_SWITCH, 0L)
+        if (extSwitchMs > 0L) {
+            prefs.edit().putLong(K_EXT_SWITCH, 0L).apply()
+            if ((now - extSwitchMs) in 0L until GRACE_PERIOD_MS) return false
+        }
+        return (now - lastActiveElapsedMs) >= cfg.timeoutMs
     }
 
     private fun recordFailure(): VerifyResult {
         val fails = prefs.getInt(K_FAILS, 0) + 1
-        val cooldown = when {
-            fails >= 10 -> 300_000L
-            fails >= 8 -> 120_000L
-            fails >= 5 -> 30_000L
-            else -> 0L
-        }
+        val cooldown = when { fails >= 10 -> 300_000L; fails >= 8 -> 120_000L; fails >= 5 -> 30_000L; else -> 0L }
         val ed = prefs.edit().putInt(K_FAILS, fails)
         if (cooldown > 0L) {
-            ed.putLong(K_LOCK_DUR, cooldown)
-                .putLong(K_LOCK_ELAPSED, SystemClock.elapsedRealtime() + cooldown)
-                .putLong(K_LOCK_WALL, System.currentTimeMillis() + cooldown)
-                .apply()
+            ed.putLong(K_LOCK_DUR, cooldown).putLong(K_LOCK_ELAPSED, SystemClock.elapsedRealtime() + cooldown)
+                .putLong(K_LOCK_WALL, System.currentTimeMillis() + cooldown).apply()
             return VerifyResult.LockedOut(cooldown)
         }
         ed.apply()
@@ -192,32 +183,21 @@ class AppLockManager(private val context: Context) {
     }
 
     private fun clearFailures() {
-        prefs.edit().putInt(K_FAILS, 0).putLong(K_LOCK_ELAPSED, 0L)
-            .putLong(K_LOCK_WALL, 0L).putLong(K_LOCK_DUR, 0L).apply()
+        prefs.edit().putInt(K_FAILS, 0).putLong(K_LOCK_ELAPSED, 0L).putLong(K_LOCK_WALL, 0L).putLong(K_LOCK_DUR, 0L).apply()
     }
 
     private fun hashSecret(secret: CharArray, salt: ByteArray, kdf: String): ByteArray {
         val spec = PBEKeySpec(secret, salt, ITERATIONS, 256)
-        return try {
-            SecretKeyFactory.getInstance(kdf).generateSecret(spec).encoded
-        } finally {
-            spec.clearPassword()
-            secret.fill('\u0000')
-        }
+        return try { SecretKeyFactory.getInstance(kdf).generateSecret(spec).encoded } finally { spec.clearPassword(); secret.fill('\u0000') }
     }
 
     private fun generateRecoveryCode(): String {
         val sb = StringBuilder("636M-")
-        repeat(8) { idx ->
-            if (idx == 4) sb.append('-')
-            sb.append(RECOVERY_CHARS[rng.nextInt(RECOVERY_CHARS.length)])
-        }
+        repeat(8) { idx -> if (idx == 4) sb.append('-'); sb.append(RECOVERY_CHARS[rng.nextInt(RECOVERY_CHARS.length)]) }
         return sb.toString()
     }
 
-    private fun normalizeRecovery(raw: String): String =
-        raw.uppercase().filter { it.isLetterOrDigit() }
-
+    private fun normalizeRecovery(raw: String): String = raw.uppercase().filter { it.isLetterOrDigit() }
     private fun b64(bytes: ByteArray): String = Base64.encodeToString(bytes, Base64.NO_WRAP)
     private fun unb64(str: String): ByteArray = Base64.decode(str, Base64.NO_WRAP)
 }
