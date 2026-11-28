@@ -540,4 +540,71 @@ interface CatalogDao {
 
     @Query("UPDATE seller_shop_items SET price_paise = :pricePaise, cost_price_paise = :costPricePaise, stock_status = :stockStatus, updated_at = :now WHERE product_id = :productId")
     suspend fun updateMorningRate(productId: Int, pricePaise: Long, costPricePaise: Long, stockStatus: Int, now: Long)
+
+    @Query(
+        """
+        SELECT m.product_id AS productId, m.category_code AS categoryCode,
+               m.category_en AS categoryEn, m.category_ta AS categoryTa,
+               m.name_en AS nameEn, m.name_ta AS nameTa,
+               m.default_unit AS unit, m.icon_res_name AS iconResName,
+               1 AS isEnabledInShop, 0 AS pricePaise, 0 AS costPricePaise,
+               'A' AS qualityGrade, 1 AS stockStatus, 0 AS stockQtyMilli,
+               0 AS orderCount, 0 AS updatedAt, COALESCE(c.qty_milli, 0) AS buyerCartQtyMilli,
+               0 AS bulkMinQtyMilli, 0 AS bulkPricePaise, 100 AS minOrderMilli,
+               100 AS stepQtyMilli, '' AS varietyTag,
+               m.shape_code AS shapeCode, m.color_code AS colorCode,
+               m.size_rank AS sizeRank, m.weight_rank AS weightRank,
+               m.search_keywords AS searchKeywords, m.is_perishable AS isPerishable,
+               m.def_bundle_milli AS defBundleMilli, m.unit_step_mode AS unitStepMode,
+               m.is_archived AS isArchived
+        FROM master_products m
+        LEFT JOIN buyer_cart_items c ON c.shop_id = '__HOME__' AND c.product_id = m.product_id
+        WHERE m.is_archived = 0
+          AND (:hidePersonal = 0 OR m.product_id NOT IN (SELECT product_id FROM buyer_hidden_products))
+        ORDER BY m.product_id ASC
+        """
+    )
+    fun observePreShopHomeCatalog(hidePersonal: Boolean): Flow<List<CatalogDisplayItem>>
+
+    @Query(
+        """
+        SELECT m.product_id AS productId, m.category_code AS categoryCode,
+               m.category_en AS categoryEn, m.category_ta AS categoryTa,
+               m.name_en AS nameEn, m.name_ta AS nameTa,
+               m.default_unit AS unit, m.icon_res_name AS iconResName,
+               CASE WHEN p.product_id IS NOT NULL AND p.stock_status > 0 THEN 1 ELSE 0 END AS isEnabledInShop,
+               COALESCE(p.price_paise, 0) AS pricePaise, 0 AS costPricePaise,
+               COALESCE(p.quality_grade, 'A') AS qualityGrade,
+               COALESCE(p.stock_status, 0) AS stockStatus,
+               COALESCE(p.stock_qty_milli, 0) AS stockQtyMilli,
+               0 AS orderCount, 0 AS updatedAt, COALESCE(c.qty_milli, 0) AS buyerCartQtyMilli,
+               COALESCE(p.bulk_min_qty_milli, 0) AS bulkMinQtyMilli,
+               COALESCE(p.bulk_price_paise, 0) AS bulkPricePaise,
+               COALESCE(p.min_order_milli, 100) AS minOrderMilli,
+               COALESCE(p.step_qty_milli, 100) AS stepQtyMilli,
+               COALESCE(p.variety_tag, '') AS varietyTag,
+               m.shape_code AS shapeCode, m.color_code AS colorCode,
+               m.size_rank AS sizeRank, m.weight_rank AS weightRank,
+               m.search_keywords AS searchKeywords, m.is_perishable AS isPerishable,
+               m.def_bundle_milli AS defBundleMilli, m.unit_step_mode AS unitStepMode,
+               m.is_archived AS isArchived
+        FROM master_products m
+        LEFT JOIN buyer_shop_prices p ON p.product_id = m.product_id AND p.shop_id = :shopId
+        LEFT JOIN buyer_cart_items c ON c.shop_id = :shopId AND c.product_id = m.product_id
+        WHERE m.is_archived = 0
+          AND (p.product_id IS NOT NULL OR c.product_id IS NOT NULL)
+          AND (:hidePersonal = 0 OR m.product_id NOT IN (SELECT product_id FROM buyer_hidden_products))
+        ORDER BY CASE WHEN p.product_id IS NOT NULL THEN 0 ELSE 1 END, m.product_id ASC
+        """
+    )
+    fun observeBuyerShopCatalogV2(shopId: String, hidePersonal: Boolean): Flow<List<CatalogDisplayItem>>
+
+    @Query("SELECT * FROM buyer_cart_items WHERE shop_id = :shopId")
+    suspend fun getCartForShopOnce(shopId: String): List<BuyerCartItemEntity>
+
+    @Transaction
+    suspend fun replaceShopCartSnapshot(shopId: String, items: List<BuyerCartItemEntity>) {
+        clearShopCart(shopId)
+        items.forEach { upsertCartItem(it.copy(shopId = shopId)) }
+    }
 }
