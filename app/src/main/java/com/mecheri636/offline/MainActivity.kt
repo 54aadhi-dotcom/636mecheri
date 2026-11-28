@@ -15,6 +15,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.core.view.WindowInsetsControllerCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.mecheri636.offline.data.db.CatalogDisplayItem
@@ -43,6 +44,10 @@ class MainActivity : ComponentActivity() {
         else window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
     }
 
+    private fun applyStatusBarAppearance(isLightBackground: Boolean) {
+        WindowInsetsControllerCompat(window, window.decorView).isAppearanceLightStatusBars = isLightBackground
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         val m = AppLockManager(this).also { lockMgr = it }
@@ -54,7 +59,8 @@ class MainActivity : ComponentActivity() {
                 onToggleVolumeKeyStep = { volumeKeyStepEnabled.value = it },
                 volumeStepEvent = volumeStepEvent.value,
                 onApplyFlagSecure = ::applyFlagSecure,
-                onApplyKeepScreenOn = ::applyKeepScreenOn
+                onApplyKeepScreenOn = ::applyKeepScreenOn,
+                onApplyStatusBarAppearance = ::applyStatusBarAppearance
             )
         }
     }
@@ -90,10 +96,13 @@ class MainActivity : ComponentActivity() {
 fun MecheriRootApp(
     vm: MecheriViewModel, bgTick: Int, volumeKeyStepEnabled: Boolean,
     onToggleVolumeKeyStep: (Boolean) -> Unit, volumeStepEvent: Pair<Int, Int>,
-    onApplyFlagSecure: (Boolean) -> Unit, onApplyKeepScreenOn: (Boolean) -> Unit
+    onApplyFlagSecure: (Boolean) -> Unit, onApplyKeepScreenOn: (Boolean) -> Unit,
+    onApplyStatusBarAppearance: (Boolean) -> Unit
 ) {
     val role by vm.role.collectAsStateWithLifecycle()
     val customization by vm.customization.collectAsStateWithLifecycle()
+    val featureConfig by vm.featureConfig.collectAsStateWithLifecycle()
+    val customProducts by vm.customProducts.collectAsStateWithLifecycle()
     val filter by vm.filter.collectAsStateWithLifecycle()
     val sellerProfile by vm.sellerProfile.collectAsStateWithLifecycle()
     val buyerProfile by vm.buyerProfile.collectAsStateWithLifecycle()
@@ -124,6 +133,7 @@ fun MecheriRootApp(
     var vaultUnlocked by remember { mutableStateOf(false) }
     var lockRefresh by remember { mutableStateOf(0) }
     var posOpen by remember { mutableStateOf(false) }
+    var adminOpen by remember { mutableStateOf(false) }
     LaunchedEffect(Unit) { vm.checkAppLock() }
     LaunchedEffect(bgTick) { if (bgTick > 0) { vaultUnlocked = false; vm.checkAppLock() } }
     var selectedTab by remember(role) { mutableStateOf(0) }
@@ -134,13 +144,21 @@ fun MecheriRootApp(
             (role == UserRole.BUYER && selectedTab == 2 && buyerCart.isNotEmpty())
         onApplyKeepScreenOn(keepOn)
     }
+    LaunchedEffect(customization.themeMode) {
+        onApplyStatusBarAppearance(customization.themeMode != AppThemeMode.OLED_DARK)
+    }
     var showSort by remember { mutableStateOf(false) }; var showFilter by remember { mutableStateOf(false) }
     var showCustom by remember { mutableStateOf(false) }; var editItem by remember { mutableStateOf<CatalogDisplayItem?>(null) }
-    val lockCfg = remember(isLocked, lockRefresh, vaultUnlocked, selectedTab) { vm.appLockManager.getConfig() }
-    val scopedLock = isLocked && lockCfg.scope == LockScope.PROFIT_AND_VAULT_ONLY && !vaultUnlocked
-    val colors = if (customization.themeMode == AppThemeMode.OLED_DARK) darkColorScheme(primary = Color(0xFF81C784), background = Color.Black, surface = Color(0xFF121212)) else lightColorScheme(primary = Color(0xFF1B5E20), secondaryContainer = Color(0xFFE8F5E9))
+    val lockCfg = remember(isLocked, lockRefresh, vaultUnlocked, selectedTab, adminOpen) { vm.appLockManager.getConfig() }
+    val lockEnabled = remember(isLocked, lockRefresh, vaultUnlocked, selectedTab, adminOpen) { vm.appLockManager.isLockEnabled() }
+    val adminLocked = lockEnabled && (lockCfg.scope == LockScope.PROFIT_AND_VAULT_ONLY || lockCfg.staffModeEnabled) && !vaultUnlocked
+    val colors = if (customization.themeMode == AppThemeMode.OLED_DARK) {
+        darkColorScheme(primary = Color(0xFF81C784), background = Color.Black, surface = Color(0xFF121212))
+    } else {
+        lightColorScheme(primary = Color(0xFF1B5E20), secondaryContainer = Color(0xFFE8F5E9), background = Color(0xFFF5F5F5), surface = Color(0xFFFFFFFF), surfaceVariant = Color(0xFFFFFFFF), outline = Color(0xFFE0E0E0), outlineVariant = Color(0xFFE0E0E0))
+    }
     MaterialTheme(colorScheme = colors) {
-        if (isLocked && lockCfg.scope == LockScope.FULL_APP) { AppLockGateScreen(vm.appLockManager) { vm.unlockApp(); vaultUnlocked = true }; return@MaterialTheme }
+        if (isLocked && lockCfg.scope == LockScope.FULL_APP && !lockCfg.staffModeEnabled) { AppLockGateScreen(vm.appLockManager) { vm.unlockApp(); vaultUnlocked = true }; return@MaterialTheme }
         if (activeScanner != ActiveScanner.NONE) {
             OfflineQrScannerScreen(
                 title = when (activeScanner) { ActiveScanner.BUYER_SCAN_SHOP -> "Scan Shop QR"; ActiveScanner.BUYER_SCAN_RECEIPT -> "Scan Receipt QR"; ActiveScanner.SCAN_SOS -> "Scan SOS QR"; else -> "Scan Cart QR" },
@@ -157,18 +175,21 @@ fun MecheriRootApp(
                 TopAppBar(
                     title = { Column { Text("636mecheri", fontWeight = FontWeight.Bold, style = MaterialTheme.typography.titleMedium); Text(if (role == UserRole.SELLER) "Seller Mode / விற்பனையாளர்" else "Buyer Mode / வாங்குபவர்", style = MaterialTheme.typography.labelSmall) } },
                     actions = {
-                        if (role == UserRole.SELLER && sellerProfile != null) { FilledTonalButton({ posOpen = !posOpen }, contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)) { Text(if (posOpen) "Catalog" else "⚡ POS") }; Spacer(Modifier.width(4.dp)) }
-                        FilledTonalButton(onClick = { posOpen = false; vm.toggleRole() }, contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp)) { Icon(Icons.Default.SwapHoriz, null, Modifier.size(16.dp)); Spacer(Modifier.width(4.dp)); Text(if (role == UserRole.SELLER) "→ Buyer" else "→ Seller") }
+                        if (role == UserRole.SELLER && sellerProfile != null) {
+                            if (featureConfig.walkInPosEnabled) { FilledTonalButton({ adminOpen = false; posOpen = !posOpen }, contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)) { Text(if (posOpen) "Catalog" else "⚡ POS") }; Spacer(Modifier.width(4.dp)) }
+                            IconButton({ posOpen = false; adminOpen = !adminOpen }) { Icon(Icons.Default.Settings, "Admin") }
+                        }
+                        FilledTonalButton(onClick = { posOpen = false; adminOpen = false; vm.toggleRole() }, contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)) { Icon(Icons.Default.SwapHoriz, null, Modifier.size(16.dp)); Spacer(Modifier.width(2.dp)); Text(if (role == UserRole.SELLER) "Buyer" else "Seller") }
                     }
                 )
             },
             bottomBar = {
                 NavigationBar {
                     if (role == UserRole.SELLER) {
-                        NavigationBarItem(selectedTab == 0 && !posOpen, { posOpen = false; selectedTab = 0 }, { Icon(Icons.Default.Storefront, null) }, label = { Text("Catalog") })
-                        NavigationBarItem(selectedTab == 1 && !posOpen, { posOpen = false; selectedTab = 1 }, { Icon(Icons.Default.QrCode, null) }, label = { Text("Shop QR") })
-                        NavigationBarItem(selectedTab == 2 && !posOpen, { posOpen = false; selectedTab = 2 }, { Icon(Icons.Default.Assessment, null) }, label = { Text("Profit") })
-                        NavigationBarItem(selectedTab == 3 && !posOpen, { posOpen = false; selectedTab = 3 }, { Icon(Icons.Default.VerifiedUser, null) }, label = { Text("0% Net") })
+                        NavigationBarItem(selectedTab == 0 && !posOpen && !adminOpen, { posOpen = false; adminOpen = false; selectedTab = 0 }, { Icon(Icons.Default.Storefront, null) }, label = { Text("Catalog") })
+                        NavigationBarItem(selectedTab == 1 && !posOpen && !adminOpen, { posOpen = false; adminOpen = false; selectedTab = 1 }, { Icon(Icons.Default.QrCode, null) }, label = { Text("Shop QR") })
+                        NavigationBarItem(selectedTab == 2 && !posOpen && !adminOpen, { posOpen = false; adminOpen = false; selectedTab = 2 }, { Icon(Icons.Default.Assessment, null) }, label = { Text("Profit") })
+                        NavigationBarItem(selectedTab == 3 && !posOpen && !adminOpen, { posOpen = false; adminOpen = false; selectedTab = 3 }, { Icon(Icons.Default.VerifiedUser, null) }, label = { Text("0% Net") })
                     } else {
                         NavigationBarItem(selectedTab == 0, { selectedTab = 0 }, { Icon(Icons.Default.Store, null) }, label = { Text("Shops") })
                         NavigationBarItem(selectedTab == 1, { selectedTab = 1 }, { Icon(Icons.Default.ViewList, null) }, label = { Text("Browse") })
@@ -180,22 +201,26 @@ fun MecheriRootApp(
         ) { pad ->
             Box(Modifier.fillMaxSize().padding(pad)) {
                 val slotCounts = remember(allPosDrafts) { allPosDrafts.groupingBy { it.slotId }.eachCount() }
-                if (selectedTab == 3) {
-                    if (scopedLock) AppLockGateScreen(vm.appLockManager) { vm.unlockApp(); vaultUnlocked = true }
-                    else TrustVerifierScreen(auditReport, { vm.refreshOfflineAudit() }, vm.appLockManager, { vaultUnlocked = false; lockRefresh += 1; vm.checkAppLock() }, { on -> lockRefresh += 1; onApplyFlagSecure(vm.appLockManager.isLockEnabled() && on) })
+                if (selectedTab == 3 && !adminOpen && !posOpen) {
+                    if (adminLocked) AppLockGateScreen(vm.appLockManager, "Owner Unlock / உரிமையாளர் பூட்டு") { vm.unlockApp(); vaultUnlocked = true }
+                    else TrustVerifierScreen(auditReport, { vm.refreshOfflineAudit() }, vm.appLockManager, { vaultUnlocked = false; lockRefresh += 1; vm.checkAppLock() }, { on -> lockRefresh += 1; onApplyFlagSecure(vm.appLockManager.isLockEnabled() && on) }, sellerProfile?.lastBackupEpochMs ?: 0L, vm::markBackupExportedNow)
                 } else if (role == UserRole.SELLER) {
                     val prof = sellerProfile
                     if (prof == null) SellerShopSetupCard(null) { n, a, u, p -> vm.createOrUpdateShop(n, a, u, p) }
+                    else if (adminOpen) {
+                        if (adminLocked) AppLockGateScreen(vm.appLockManager, "Admin Unlock / நிர்வாக பூட்டு") { vm.unlockApp(); vaultUnlocked = true }
+                        else AdminControlPanelScreen(featureConfig, customProducts, vm::applyShopPreset, vm::updateFeatureConfig, vm::resetFeatureDefaults, vm::upsertCustomPosItem, vm::archiveCustomPosItem, vm::buildDailySummaryPdfBytes, vm::buildShopQrPosterPdfBytes, vm::buildSalesCsvBytes)
+                    }
                     else if (packingSummary != null) SellerCounterPackingScreen(packingSummary!!, lastReceiptQr, { amt, note -> vm.buildDynamicUpiQrForOrder(amt, note) }, { col, mode, c, u, rsn, utr -> vm.confirmCounterOrderPacked(col, mode, c, u, rsn, utr) }, { vm.clearPackingSession() })
                     else if (posOpen) SellerSpeedPosScreen(prof.shopName, activePosSlot, slotCounts, activePosDrafts, rawSellerItems, udhaarList, eveningModeOn, clockDriftDetected, vm::selectPosSlot, vm::toggleEveningMode, { pId, qM, ovP -> vm.addOrUpdatePosItem(activePosSlot, pId, qM, ovP) }, { lbl, amtP -> vm.addPosMiscItem(activePosSlot, lbl, amtP) }, vm::removePosDraftRow, vm::clearPosDraftSlot, { al, ar, cb -> vm.addUdhaarCustomerImmediate(al, ar, cb) }, { amt, note -> vm.buildDynamicUpiQrForOrder(amt, note) }, vm::completePosCheckout, { posOpen = false })
                     else when (selectedTab) {
                         0 -> Column(Modifier.fillMaxSize()) {
                             CatalogToolbar(UserRole.SELLER, filter, vm::updateFilter, { showSort = true }, { showFilter = true }, { showCustom = true })
                             val vis = remember(rawSellerItems, filter) { CatalogFilterEngine.apply(rawSellerItems, UserRole.SELLER, filter) }
-                            MultiViewCatalogBrowser(vis, UserRole.SELLER, filter, customization, { id, en -> vm.setSellerItemEnabled(id, en) }, { c, en -> vm.setCategoryEnabledForSeller(c, en) }, { editItem = it }, { _, _, _ -> }, {}, volumeKeyStepEnabled, onToggleVolumeKeyStep, volumeStepEvent)
+                            MultiViewCatalogBrowser(vis, UserRole.SELLER, filter, customization, { id, en -> vm.setSellerItemEnabled(id, en) }, { c, en -> vm.setCategoryEnabledForSeller(c, en) }, { item -> if (adminLocked) adminOpen = true else editItem = item }, { _, _, _ -> }, {}, volumeKeyStepEnabled, onToggleVolumeKeyStep, volumeStepEvent)
                         }
                         1 -> SellerLiveBoardQrScreen(prof, remember(rawSellerItems, prof) { vm.buildSellerShopBoardQrFrames() }, { v, p -> vm.updateShopUpi(v, p) }, { activeScanner = ActiveScanner.SELLER_SCAN_CART })
-                        2 -> if (scopedLock) AppLockGateScreen(vm.appLockManager) { vm.unlockApp(); vaultUnlocked = true } else SellerOpsV2Container(recentOrders, remember(rawSellerItems) { rawSellerItems.filter { it.isEnabledInShop } }, vm::voidSellerOrder, vm::updateMorningRate) {
+                        2 -> if (adminLocked) AppLockGateScreen(vm.appLockManager, "Owner Unlock / உரிமையாளர் பூட்டு") { vm.unlockApp(); vaultUnlocked = true } else SellerOpsV2Container(recentOrders, remember(rawSellerItems) { rawSellerItems.filter { it.isEnabledInShop } }, vm::voidSellerOrder, vm::updateMorningRate) {
                             SellerOpsHubScreen(profitReport, remember(rawSellerItems) { rawSellerItems.filter { it.isEnabledInShop } }, udhaarList, zReports, auditLogs, { t, a, n -> vm.recordExpense(t, a, n) }, { id, q, l, r -> vm.recordWaste(id, q, l, r) }, { id, q, c, n -> vm.recordStockInward(id, q, c, n) }, { al, ar, d, r, ex -> vm.upsertUdhaarCustomer(al, ar, d, r, ex) }, { o, c, n -> vm.recordCashZReportIst(o, c, n) }, { k, j -> vm.saveDraft(k, j) }, { k, cb -> vm.loadDraft(k, cb) }, { k -> vm.clearDraft(k) }, customization.language != AppLanguage.ENGLISH, volumeKeyStepEnabled, onToggleVolumeKeyStep, volumeStepEvent)
                         }
                     }

@@ -607,4 +607,13 @@ interface CatalogDao {
         clearShopCart(shopId)
         items.forEach { upsertCartItem(it.copy(shopId = shopId)) }
     }
+
+    @Query("SELECT COALESCE(MAX(product_id), 10000) + 1 FROM master_products WHERE product_id >= 10001")
+    suspend fun getNextCustomProductId(): Int
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsertMasterProduct(item: MasterProductEntity)
+
+    @Query("SELECT * FROM master_products WHERE product_id >= 10001 AND is_archived = 0 ORDER BY product_id ASC")
+    fun observeCustomProducts(): Flow<List<MasterProductEntity>>
 }

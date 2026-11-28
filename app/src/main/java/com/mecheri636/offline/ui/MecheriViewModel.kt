@@ -299,4 +299,93 @@ class MecheriViewModel(application: Application) : AndroidViewModel(application)
     private val _lastSosChunk = MutableStateFlow<QrCodec.SosRelayChunk?>(null); val lastSosChunk = _lastSosChunk.asStateFlow(); fun clearLastSos() { _lastSosChunk.value = null }
     fun buildSosQrFrames(kind: String): List<String> { val m = System.currentTimeMillis() / 60000L; val sid = "SOS${m % 10000}"; return when (kind) { "X1" -> { val p = sellerProfile.value ?: return emptyList(); val body = rawSellerCatalog.value.filter { it.isEnabledInShop && it.pricePaise > 0L }.take(25).joinToString(",") { "${it.productId}:${it.pricePaise}" }; QrCodec.encodeSosChunk(QrCodec.SosRelayChunk("X1", sid, p.shopId, p.shopName, p.upiVpa, m, body)) }; "B1" -> { val shopId = activeBuyerShopKey(); val shop = savedShops.value.firstOrNull { it.shopId == shopId }; val cart = activeBuyerCart.value; if (cart.isEmpty()) return emptyList(); val body = cart.joinToString(",") { "${it.productId}:${it.qtyMilli}" }; QrCodec.encodeSosChunk(QrCodec.SosRelayChunk("B1", sid, shopId, shop?.shopName ?: shopId, shop?.upiVpa ?: "", m, body)) }; else -> { val p = sellerProfile.value ?: return emptyList(); val r = profitReport.value; val body = "ORD=${r.completedOrders},CASH=${r.cashPaise},UPI=${r.upiPaise},NET=${r.trueNetProfitPaise}"; QrCodec.encodeSosChunk(QrCodec.SosRelayChunk("X3", sid, p.shopId, p.shopName, p.upiVpa, m, body)) } } }
     fun handleScannedSosQr(qrText: String) = viewModelScope.launch { try { val c = QrCodec.decodeSosChunk(qrText); _lastSosChunk.value = c; val now = System.currentTimeMillis(); when (c.kind) { "B1" -> { val pairs = c.body.split(",").mapNotNull { t -> val s = t.split(":"); if (s.size == 2) s[0].toIntOrNull()?.let { id -> s[1].toLongOrNull()?.let { q -> id to q } } else null }; if (pairs.isNotEmpty()) { selectBuyerShop(c.shopId); pairs.forEach { (id, q) -> val pr = rawBuyerCatalog.value.firstOrNull { it.productId == id }?.pricePaise ?: 0L; dao.upsertCartItem(BuyerCartItemEntity(c.shopId, id, q, pr, now)) }; _statusMessage.value = "SOS Cart (${pairs.size} items) imported!" } }; "X1" -> { val prices = c.body.split(",").mapNotNull { t -> val s = t.split(":"); if (s.size == 2) s[0].toIntOrNull()?.let { id -> s[1].toLongOrNull()?.let { pr -> BuyerShopPriceEntity(c.shopId, id, pr, "A", 1) } } else null }; if (prices.isNotEmpty()) { dao.replaceShopCatalogSnapshot(BuyerSavedShopEntity(c.shopId, c.shopName, 1, now, "SOS", false, 0L, c.upiVpa), prices); selectBuyerShop(c.shopId); _statusMessage.value = "SOS Shop '${c.shopName}' (${prices.size} items) loaded!" } }; "X3" -> { dao.insertAuditLog(AuditLogEntity(actionType = "SOS_X3", refId = c.relaySessionId, summary = "${c.shopName}: ${c.body}", createdAt = now)); _statusMessage.value = "SOS Return Sync logged (${c.relaySessionId})" } } } catch (e: Exception) { _statusMessage.value = "Invalid SOS QR: ${e.message}" } }
+
+    private val featureStore = ShopFeatureConfigStore(application)
+    private val _featureConfig = MutableStateFlow(featureStore.load())
+    val featureConfig = _featureConfig.asStateFlow()
+    val customProducts = dao.observeCustomProducts().stateIn(viewModelScope, st, emptyList())
+
+    fun updateFeatureConfig(transform: (ShopFeatureConfig) -> ShopFeatureConfig) {
+        val next = transform(_featureConfig.value)
+        featureStore.save(next)
+        _featureConfig.value = next
+    }
+
+    fun applyShopPreset(preset: ShopPreset) {
+        val next = ShopFeatureConfig.forPreset(preset)
+        featureStore.save(next)
+        _featureConfig.value = next
+        _statusMessage.value = "Preset applied: ${preset.labelEn}"
+    }
+
+    fun resetFeatureDefaults() {
+        _featureConfig.value = featureStore.resetDefaults()
+        _statusMessage.value = "Feature settings reset to defaults."
+    }
+
+    fun upsertCustomPosItem(existingId: Int?, nameEn: String, nameTa: String, unit: String, priceRs: Double, costRs: Double) = viewModelScope.launch {
+        val cleanEn = nameEn.trim().take(36); val cleanTa = nameTa.trim().ifBlank { cleanEn }.take(36)
+        if (cleanEn.isBlank()) return@launch
+        val now = System.currentTimeMillis()
+        val pid = existingId?.takeIf { it >= 10001 } ?: dao.getNextCustomProductId()
+        val u = unit.ifBlank { "pc" }
+        dao.upsertMasterProduct(MasterProductEntity(pid, "CUSTOM", "Custom Shop Items", "கடை பொருட்கள்", cleanEn, cleanTa, u, "ic_prod_001", 1, "ROUND", "GREEN", 2, 2, "$cleanEn $cleanTa", false, if (u == "kg") 250L else 1000L, CatalogMetadataV3.resolveStepMode(pid, u), false))
+        dao.initializeAllHiddenForSeller()
+        dao.updateSellerItemDetails(pid, (priceRs * 100.0).roundToLong().coerceAtLeast(0L), (costRs * 100.0).roundToLong().coerceAtLeast(0L), "A", 1, 10_000L, now)
+        dao.setSellerItemEnabled(pid, true, now)
+        dao.insertAuditLog(AuditLogEntity(actionType = "CUSTOM_ITEM", refId = "#$pid", summary = cleanEn, createdAt = now))
+        _statusMessage.value = "Custom item saved (#$pid $cleanEn)"
+    }
+
+    fun archiveCustomPosItem(productId: Int) = viewModelScope.launch {
+        if (productId < 10001) return@launch
+        val now = System.currentTimeMillis()
+        dao.setMasterProductArchived(productId, true)
+        dao.setSellerItemEnabled(productId, false, now)
+        dao.insertAuditLog(AuditLogEntity(actionType = "ARCHIVE_ITEM", refId = "#$productId", summary = "Soft-archived", createdAt = now))
+        _statusMessage.value = "Custom item #$productId archived (Soft Delete)."
+    }
+
+    fun markBackupExportedNow() = viewModelScope.launch {
+        dao.updateLastBackupEpochMs(System.currentTimeMillis())
+    }
+
+    fun buildDailySummaryPdfBytes(paper: ExportPaperSize): ByteArray {
+        val shop = sellerProfile.value?.shopName ?: "636mecheri Shop"
+        val r = profitReport.value
+        val fmt = SimpleDateFormat("dd MMM yyyy, hh:mm a", Locale.getDefault())
+        val sb = StringBuilder()
+            .append("Date: ").append(fmt.format(Date())).append("\n")
+            .append("Orders: ").append(r.completedOrders).append("\n")
+            .append("Collected: ").append(CatalogFilterEngine.formatRs(r.totalSalesPaise)).append("\n")
+            .append("Cash: ").append(CatalogFilterEngine.formatRs(r.cashPaise))
+            .append(" | UPI: ").append(CatalogFilterEngine.formatRs(r.upiPaise)).append("\n")
+            .append("COGS: ").append(CatalogFilterEngine.formatRs(r.totalCogsPaise)).append("\n")
+            .append("Expenses: ").append(CatalogFilterEngine.formatRs(r.totalExpensesPaise))
+            .append(" | Waste: ").append(CatalogFilterEngine.formatRs(r.totalWasteLossPaise)).append("\n")
+            .append("NET PROFIT: ").append(CatalogFilterEngine.formatRs(r.trueNetProfitPaise)).append("\n\n")
+            .append("Recent Bills:\n")
+        recentOrders.value.take(25).forEach { o ->
+            sb.append(o.receiptCode).append(" | ").append(o.paymentMode).append(" | ")
+                .append(CatalogFilterEngine.formatRs(o.totalPaise)).append(" [").append(o.orderStatus).append("]\n")
+        }
+        return OfflineExportEngine.buildTextPdfBytes("$shop — Daily Report / தினசரி அறிக்கை", sb.toString(), paper)
+    }
+
+    fun buildShopQrPosterPdfBytes(paper: ExportPaperSize): ByteArray? {
+        val prof = sellerProfile.value ?: return null
+        val frame = buildSellerShopBoardQrFrames().firstOrNull() ?: return null
+        val bmp = QrBitmapGenerator.generate(frame, 640)
+        val sub = "Shop ID: ${prof.shopId}  •  100% Offline QR Price Board\nScan with 636mecheri App (0% Internet)"
+        return OfflineExportEngine.buildQrPosterPdfBytes("${prof.shopName}\n${prof.shopArea}", sub, bmp, paper)
+    }
+
+    fun buildSalesCsvBytes(): ByteArray {
+        val fmt = SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.US)
+        val headers = listOf("ReceiptCode", "DateTime", "Buyer", "Mode", "Status", "TotalRs", "CollectedRs", "CashRs", "UpiRs", "UtrLast4")
+        val rows = recentOrders.value.map { o ->
+            listOf(o.receiptCode, fmt.format(Date(o.createdAt)), o.buyerAlias, o.paymentMode, o.orderStatus, "%.2f".format(Locale.US, o.totalPaise / 100.0), "%.2f".format(Locale.US, o.collectedPaise / 100.0), "%.2f".format(Locale.US, o.cashPaise / 100.0), "%.2f".format(Locale.US, o.upiPaise / 100.0), o.utrLast4)
+        }
+        return OfflineExportEngine.buildUtf8BomCsvBytes(headers, rows)
+    }
 }

@@ -16,8 +16,8 @@ android {
         applicationId = "com.mecheri636.offline"
         minSdk = 24
         targetSdk = 36
-        versionCode = 4
-        versionName = "1.0.3-offline"
+        versionCode = 5
+        versionName = "2.0.0-offline"
     }
 
         signingConfigs {
