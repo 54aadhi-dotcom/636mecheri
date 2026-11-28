@@ -153,7 +153,7 @@ class MecheriViewModel(application: Application) : AndroidViewModel(application)
             if (lineTotal <= 0L && r.qtyMilli <= 0L) null
             else {
                 val cogs = if (r.productId > 0) SellerOperationsEngine.computeLinePaise(r.qtyMilli, catMap[r.productId]?.costPricePaise ?: 0L) else 0L
-                SellerOrderItemEntity(0L, 0L, r.productId.coerceAtLeast(1), r.qtyMilli, r.unitPricePaise, lineTotal, r.customLabel.ifBlank { catMap[r.productId]?.nameEn ?: "Misc" }, cogs, false, 0L)
+                SellerOrderItemEntity(0L, 0L, r.productId, r.qtyMilli, r.unitPricePaise, lineTotal, r.customLabel.ifBlank { catMap[r.productId]?.nameEn ?: "Misc" }, cogs, false, 0L)
             }
         }
         if (lineItems.isEmpty()) return@launch
@@ -244,4 +244,40 @@ class MecheriViewModel(application: Application) : AndroidViewModel(application)
     private val _lastSosChunk = MutableStateFlow<QrCodec.SosRelayChunk?>(null); val lastSosChunk = _lastSosChunk.asStateFlow(); fun clearLastSos() { _lastSosChunk.value = null }
     fun buildSosQrFrames(kind: String): List<String> { val m = System.currentTimeMillis() / 60000L; val sid = "SOS${m % 10000}"; return when (kind) { "X1" -> { val p = sellerProfile.value ?: return emptyList(); val body = rawSellerCatalog.value.filter { it.isEnabledInShop && it.pricePaise > 0L }.take(25).joinToString(",") { "${it.productId}:${it.pricePaise}" }; QrCodec.encodeSosChunk(QrCodec.SosRelayChunk("X1", sid, p.shopId, p.shopName, p.upiVpa, m, body)) }; "B1" -> { val shopId = _selectedBuyerShopId.value ?: return emptyList(); val shop = savedShops.value.firstOrNull { it.shopId == shopId }; val cart = activeBuyerCart.value; if (cart.isEmpty()) return emptyList(); val body = cart.joinToString(",") { "${it.productId}:${it.qtyMilli}" }; QrCodec.encodeSosChunk(QrCodec.SosRelayChunk("B1", sid, shopId, shop?.shopName ?: shopId, shop?.upiVpa ?: "", m, body)) }; else -> { val p = sellerProfile.value ?: return emptyList(); val r = profitReport.value; val body = "ORD=${r.completedOrders},CASH=${r.cashPaise},UPI=${r.upiPaise},NET=${r.trueNetProfitPaise}"; QrCodec.encodeSosChunk(QrCodec.SosRelayChunk("X3", sid, p.shopId, p.shopName, p.upiVpa, m, body)) } } }
     fun handleScannedSosQr(qrText: String) = viewModelScope.launch { try { val c = QrCodec.decodeSosChunk(qrText); _lastSosChunk.value = c; val now = System.currentTimeMillis(); when (c.kind) { "B1" -> { val pairs = c.body.split(",").mapNotNull { t -> val s = t.split(":"); if (s.size == 2) s[0].toIntOrNull()?.let { id -> s[1].toLongOrNull()?.let { q -> id to q } } else null }; if (pairs.isNotEmpty()) { selectBuyerShop(c.shopId); pairs.forEach { (id, q) -> val pr = rawBuyerCatalog.value.firstOrNull { it.productId == id }?.pricePaise ?: 0L; dao.upsertCartItem(BuyerCartItemEntity(c.shopId, id, q, pr, now)) }; _statusMessage.value = "SOS Cart (${pairs.size} items) imported!" } }; "X1" -> { val prices = c.body.split(",").mapNotNull { t -> val s = t.split(":"); if (s.size == 2) s[0].toIntOrNull()?.let { id -> s[1].toLongOrNull()?.let { pr -> BuyerShopPriceEntity(c.shopId, id, pr, "A", 1) } } else null }; if (prices.isNotEmpty()) { dao.replaceShopCatalogSnapshot(BuyerSavedShopEntity(c.shopId, c.shopName, 1, now, "SOS", false, 0L, c.upiVpa), prices); selectBuyerShop(c.shopId); _statusMessage.value = "SOS Shop '${c.shopName}' (${prices.size} items) loaded!" } }; "X3" -> { dao.insertAuditLog(AuditLogEntity(actionType = "SOS_X3", refId = c.relaySessionId, summary = "${c.shopName}: ${c.body}", createdAt = now)); _statusMessage.value = "SOS Return Sync logged (${c.relaySessionId})" } } } catch (e: Exception) { _statusMessage.value = "Invalid SOS QR: ${e.message}" } }
+
+    fun voidSellerOrder(orderId: Long) = viewModelScope.launch {
+        val voided = dao.voidOrderAtomically(orderId, System.currentTimeMillis())
+        if (voided != null) {
+            PosSoundFeedback.beepError()
+            _statusMessage.value = "Order ${voided.receiptCode} VOIDED (stock & Udhaar reversed)."
+        } else {
+            _statusMessage.value = "Order already voided or not found."
+        }
+    }
+
+    fun updateMorningRate(productId: Int, sellRs: Double, costRs: Double, outToday: Boolean) = viewModelScope.launch {
+        val priceP = (sellRs * 100.0).roundToLong().coerceAtLeast(0L)
+        val costP = (costRs * 100.0).roundToLong().coerceAtLeast(0L)
+        dao.updateMorningRate(productId, priceP, costP, if (outToday) 0 else 1, System.currentTimeMillis())
+        _statusMessage.value = "Rate updated (#$productId)"
+    }
+
+    fun recordCashZReportIst(openRs: Double, countedRs: Double, note: String = "") = viewModelScope.launch {
+        val now = System.currentTimeMillis()
+        val startMs = Calendar.getInstance().apply { set(Calendar.HOUR_OF_DAY, 0); set(Calendar.MINUTE, 0); set(Calendar.SECOND, 0); set(Calendar.MILLISECOND, 0) }.timeInMillis
+        val endMs = Calendar.getInstance().apply { set(Calendar.HOUR_OF_DAY, 23); set(Calendar.MINUTE, 59); set(Calendar.SECOND, 59); set(Calendar.MILLISECOND, 999) }.timeInMillis
+        val openP = (openRs * 100.0).roundToLong().coerceAtLeast(0L)
+        val cntP = (countedRs * 100.0).roundToLong().coerceAtLeast(0L)
+        val cashIn = dao.sumCashSalesBetween(startMs, endMs)
+        val expOut = dao.sumCashShopExpensesBetween(startMs, endMs)
+        val voidCash = dao.sumVoidedCashBetween(startMs, endMs)
+        val expP = (openP + cashIn - expOut).coerceAtLeast(0L)
+        val diff = cntP - expP
+        val day = SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date(now))
+        dao.updateOpeningCashFloat(openP)
+        val fullNote = if (voidCash > 0L) "${note.trim()} [VoidRef ${CatalogFilterEngine.formatRs(voidCash)}]".trim() else note.trim()
+        dao.insertCashZReport(CashZReportEntity(dayKey = day, openingFloatPaise = openP, expectedCashPaise = expP, countedCashPaise = cntP, variancePaise = diff, note = fullNote, createdAt = now))
+        dao.insertAuditLog(AuditLogEntity(actionType = "Z_REPORT", refId = day, summary = "Diff ${CatalogFilterEngine.formatRs(diff)}", deltaPaise = diff, createdAt = now))
+        _statusMessage.value = "IST Cash Z-Report saved ($day)"
+    }
 }

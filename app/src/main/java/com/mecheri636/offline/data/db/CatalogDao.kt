@@ -492,4 +492,52 @@ interface CatalogDao {
     @Query("SELECT COUNT(*) FROM buyer_receipts WHERE receipt_code = :code") suspend fun countReceiptsByCode(code: String): Int
     @Insert suspend fun insertBuyerReceipt(receipt: BuyerReceiptEntity)
     @Query("SELECT * FROM buyer_receipts ORDER BY created_at DESC LIMIT 200") fun observeBuyerReceipts(): Flow<List<BuyerReceiptEntity>>
+
+    @Query("UPDATE seller_orders SET order_status = 'VOIDED', payment_status = 'VOID' WHERE order_id = :orderId")
+    suspend fun markOrderVoided(orderId: Long)
+
+    @Query(
+        """
+        UPDATE seller_shop_items
+        SET stock_qty_milli = stock_qty_milli + :restoreMilli,
+            stock_status = CASE
+                WHEN (stock_qty_milli + :restoreMilli) <= 0 THEN 0
+                WHEN (stock_qty_milli + :restoreMilli) <= low_stock_milli THEN 2
+                ELSE 1
+            END,
+            updated_at = :now
+        WHERE product_id = :productId
+        """
+    )
+    suspend fun restoreStockOnVoid(productId: Int, restoreMilli: Long, now: Long)
+
+    @Query("UPDATE customer_udhaar SET balance_paise = MAX(0, balance_paise - :deductPaise), updated_at = :now WHERE customer_id = :customerId")
+    suspend fun reduceUdhaarBalance(customerId: Long, deductPaise: Long, now: Long)
+
+    @Transaction
+    suspend fun voidOrderAtomically(orderId: Long, now: Long): SellerOrderEntity? {
+        val order = getOrderById(orderId) ?: return null
+        if (order.orderStatus == "VOIDED" || order.paymentStatus == "VOID") return null
+        markOrderVoided(orderId)
+        getOrderItems(orderId).forEach { item ->
+            if (item.productId > 0 && item.qtyMilli > 0L) {
+                restoreStockOnVoid(item.productId, item.qtyMilli, now)
+                insertStockLedger(SellerStockLedgerEntity(productId = item.productId, entryType = "VOID_RESTORE", deltaMilli = item.qtyMilli, unitCostPaise = item.unitCogsPaise, note = order.receiptCode, createdAt = now))
+            }
+        }
+        if (order.customerId > 0L && (order.paymentMode == "UDHAAR" || order.varianceReason == "UDHAAR_DUE")) {
+            reduceUdhaarBalance(order.customerId, if (order.variancePaise > 0L) order.variancePaise else order.totalPaise, now)
+        }
+        insertAuditLog(AuditLogEntity(actionType = "VOID_ORDER", refId = order.receiptCode, summary = "Voided ${order.paymentMode}", deltaPaise = -order.collectedPaise, createdAt = now))
+        return order
+    }
+
+    @Query("SELECT COALESCE(SUM(cash_paise), 0) FROM seller_orders WHERE created_at BETWEEN :startMs AND :endMs AND order_status != 'VOIDED' AND payment_status != 'VOID'")
+    suspend fun sumCashSalesBetween(startMs: Long, endMs: Long): Long
+
+    @Query("SELECT COALESCE(SUM(cash_paise), 0) FROM seller_orders WHERE created_at BETWEEN :startMs AND :endMs AND (order_status = 'VOIDED' OR payment_status = 'VOID')")
+    suspend fun sumVoidedCashBetween(startMs: Long, endMs: Long): Long
+
+    @Query("UPDATE seller_shop_items SET price_paise = :pricePaise, cost_price_paise = :costPricePaise, stock_status = :stockStatus, updated_at = :now WHERE product_id = :productId")
+    suspend fun updateMorningRate(productId: Int, pricePaise: Long, costPricePaise: Long, stockStatus: Int, now: Long)
 }

@@ -112,6 +112,7 @@ fun MecheriRootApp(
     val udhaarList by vm.customerUdhaar.collectAsStateWithLifecycle()
     val zReports by vm.cashZReports.collectAsStateWithLifecycle()
     val auditLogs by vm.auditLogs.collectAsStateWithLifecycle()
+    val recentOrders by vm.recentOrders.collectAsStateWithLifecycle()
     val lastSos by vm.lastSosChunk.collectAsStateWithLifecycle()
     val packingSummary by vm.packingSummary.collectAsStateWithLifecycle()
     val lastReceiptQr by vm.lastReceiptQr.collectAsStateWithLifecycle()
@@ -195,7 +196,7 @@ fun MecheriRootApp(
                             MultiViewCatalogBrowser(vis, UserRole.SELLER, filter, customization, { id, en -> vm.setSellerItemEnabled(id, en) }, { c, en -> vm.setCategoryEnabledForSeller(c, en) }, { editItem = it }, { _, _, _ -> }, {}, volumeKeyStepEnabled, onToggleVolumeKeyStep, volumeStepEvent)
                         }
                         1 -> SellerLiveBoardQrScreen(prof, remember(rawSellerItems, prof) { vm.buildSellerShopBoardQrFrames() }, { v, p -> vm.updateShopUpi(v, p) }, { activeScanner = ActiveScanner.SELLER_SCAN_CART })
-                        2 -> if (scopedLock) AppLockGateScreen(vm.appLockManager) { vm.unlockApp(); vaultUnlocked = true } else SellerOpsHubScreen(profitReport, remember(rawSellerItems) { rawSellerItems.filter { it.isEnabledInShop } }, udhaarList, zReports, auditLogs, { t, a, n -> vm.recordExpense(t, a, n) }, { id, q, l, r -> vm.recordWaste(id, q, l, r) }, { id, q, c, n -> vm.recordStockInward(id, q, c, n) }, { al, ar, d, r, ex -> vm.upsertUdhaarCustomer(al, ar, d, r, ex) }, { o, c, n -> vm.recordCashZReport(o, c, n) }, { k, j -> vm.saveDraft(k, j) }, { k, cb -> vm.loadDraft(k, cb) }, { k -> vm.clearDraft(k) }, customization.language != AppLanguage.ENGLISH, volumeKeyStepEnabled, onToggleVolumeKeyStep, volumeStepEvent)
+                        2 -> if (scopedLock) AppLockGateScreen(vm.appLockManager) { vm.unlockApp(); vaultUnlocked = true } else SellerOpsV2Container(recentOrders, remember(rawSellerItems) { rawSellerItems.filter { it.isEnabledInShop } }, vm::voidSellerOrder, vm::updateMorningRate) { SellerOpsHubScreen(profitReport, remember(rawSellerItems) { rawSellerItems.filter { it.isEnabledInShop } }, udhaarList, zReports, auditLogs, { t, a, n -> vm.recordExpense(t, a, n) }, { id, q, l, r -> vm.recordWaste(id, q, l, r) }, { id, q, c, n -> vm.recordStockInward(id, q, c, n) }, { al, ar, d, r, ex -> vm.upsertUdhaarCustomer(al, ar, d, r, ex) }, { o, c, n -> vm.recordCashZReportIst(o, c, n) }, { k, j -> vm.saveDraft(k, j) }, { k, cb -> vm.loadDraft(k, cb) }, { k -> vm.clearDraft(k) }, customization.language != AppLanguage.ENGLISH, volumeKeyStepEnabled, onToggleVolumeKeyStep, volumeStepEvent) }
                     }
                 } else {
                     when (selectedTab) {
