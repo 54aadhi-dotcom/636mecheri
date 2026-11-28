@@ -1,4 +1,5 @@
 package com.mecheri636.offline.ui
+import com.mecheri636.offline.ui.screens.PosSoundFeedback
 
 import android.app.Application
 import android.content.Context

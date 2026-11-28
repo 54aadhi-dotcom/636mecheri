@@ -1,4 +1,5 @@
 package com.mecheri636.offline.ui.screens
+import com.mecheri636.offline.domain.SellerOperationsEngine
 
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.horizontalScroll
