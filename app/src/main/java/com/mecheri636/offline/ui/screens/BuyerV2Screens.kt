@@ -21,8 +21,9 @@ import kotlinx.coroutines.flow.Flow
 @Composable
 fun BuyerShopsHubScreen(
     shops: List<BuyerSavedShopEntity>, selectedShopId: String?,
-    allProducts: List<CatalogDisplayItem>, lastSos: QrCodec.SosRelayChunk?,
-    onSelectShop: (String) -> Unit, onScanNewShopQr: () -> Unit,
+    allProducts: List<CatalogDisplayItem>, buyerCart: List<BuyerCartItemEntity>,
+    lastSos: QrCodec.SosRelayChunk?,
+    onSelectShop: (String) -> Unit, onOpenHomeList: () -> Unit, onScanNewShopQr: () -> Unit,
     observeComparison: (Int) -> Flow<List<ShopPriceComparisonRow>>,
     computeQty: (Double, Long) -> Long,
     onAddFromCompare: (String, Int, Long, Long) -> Unit,
@@ -35,9 +36,9 @@ fun BuyerShopsHubScreen(
             listOf(0 to "Shops (${shops.size})", 1 to "Compare & ₹→Wt", 2 to "Battery-SOS").forEach { (i, l) -> FilterChip(sub == i, { sub = i }, { Text(l) }) }
         }
         when (sub) {
-            0 -> BuyerSavedShopsScreen(shops, selectedShopId, onSelectShop, onScanNewShopQr)
+            0 -> BuyerSavedShopsScreen(shops, selectedShopId, onSelectShop, onOpenHomeList, onScanNewShopQr)
             1 -> BuyerCompareAndCalcPanel(allProducts, observeComparison, computeQty, onSelectShop, onAddFromCompare)
-            else -> BatterySosRelayPanel(lastSos, buildSosFrames, onScanSosQr, onClearSos)
+            else -> BatterySosRelayPanel(buyerCart, lastSos, buildSosFrames, onScanSosQr, onClearSos)
         }
     }
 }
@@ -47,16 +48,16 @@ private fun BuyerCompareAndCalcPanel(
     allProducts: List<CatalogDisplayItem>,
     observeComparison: (Int) -> Flow<List<ShopPriceComparisonRow>>,
     computeQty: (Double, Long) -> Long,
-    onSelectShop: (String) -> Unit,
-    onAddFromCompare: (String, Int, Long, Long) -> Unit
+    onSelectShop: (String) -> Unit, onAddFromCompare: (String, Int, Long, Long) -> Unit
 ) {
-    var selId by remember { mutableStateOf(1) }
-    var search by remember { mutableStateOf("") }
-    var pickOpen by remember { mutableStateOf(false) }
-    var targetRsStr by remember { mutableStateOf("20") }
+    var selId by remember { mutableStateOf(1) }; var search by remember { mutableStateOf("") }
+    var pickOpen by remember { mutableStateOf(false) }; var targetRsStr by remember { mutableStateOf("20") }
     val prod = allProducts.firstOrNull { it.productId == selId } ?: allProducts.firstOrNull()
     val unit = prod?.unit ?: "kg"
     val rows by remember(selId) { observeComparison(selId) }.collectAsState(initial = emptyList())
+    val now = remember(rows) { System.currentTimeMillis() }
+    val freshRows = remember(rows, now) { rows.filter { it.pricePaise > 0L && (now - it.lastSyncedAt) <= SAVINGS_FRESHNESS_MAX_MS } }
+    val savingsPaise = remember(freshRows) { if (freshRows.size >= 2) (freshRows.maxOf { it.pricePaise } - freshRows.minOf { it.pricePaise }).coerceAtLeast(0L) else 0L }
     val targetRs = targetRsStr.toDoubleOrNull() ?: 0.0
     val numKb = KeyboardOptions(keyboardType = KeyboardType.Decimal)
     LazyColumn(Modifier.fillMaxSize().padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -65,9 +66,9 @@ private fun BuyerCompareAndCalcPanel(
                 Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text("Multi-Shop Compare & ₹→Weight / விலை ஒப்பீடு", fontWeight = FontWeight.Bold)
                     Text("Item: ${prod?.nameEn ?: "#$selId"} • ${prod?.nameTa ?: ""}", color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.SemiBold)
-                    Button({ pickOpen = !pickOpen; search = "" }, modifier = Modifier.fillMaxWidth()) {
-                        Text(if (pickOpen) "Close List" else "Pick Product / பொருள் தேர்வு (${allProducts.size})")
-                    }
+                    if (savingsPaise > 0L) Text("Fresh (<48h) Savings: Save up to ${CatalogFilterEngine.formatRs(savingsPaise)}/$unit", color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold, style = MaterialTheme.typography.bodySmall)
+                    else if (rows.size >= 2) Text("Multi-shop savings hidden (>48h old snapshot — rescan shop QR).", color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodySmall)
+                    Button({ pickOpen = !pickOpen; search = "" }, modifier = Modifier.fillMaxWidth()) { Text(if (pickOpen) "Close List" else "Pick Product / பொருள் தேர்வு (${allProducts.size})") }
                     if (pickOpen) {
                         OutlinedTextField(search, { search = it }, label = { Text("Search Tamil / English / #ID") }, singleLine = true, modifier = Modifier.fillMaxWidth())
                         allProducts.filter { search.isBlank() || it.nameEn.contains(search, true) || it.nameTa.contains(search, true) || it.productId.toString() == search }.take(20).forEach { p ->
@@ -82,6 +83,7 @@ private fun BuyerCompareAndCalcPanel(
             item { Card(Modifier.fillMaxWidth()) { Text("No synced shop sells this item yet. Scan Shop QR first.", Modifier.padding(14.dp)) } }
         } else {
             items(rows, key = { "${it.shopId}_${it.productId}" }) { r ->
+                val isFresh = (now - r.lastSyncedAt) <= SAVINGS_FRESHNESS_MAX_MS
                 val qM = if (targetRs > 0.0 && r.pricePaise > 0L) computeQty(targetRs, r.pricePaise) else 0L
                 val st = when (r.stockStatus) { 1 -> "In"; 2 -> "Low"; else -> "Out" }
                 Card(Modifier.fillMaxWidth()) {
@@ -91,7 +93,7 @@ private fun BuyerCompareAndCalcPanel(
                             Text("${CatalogFilterEngine.formatRs(r.pricePaise)}/$unit", fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
                         }
                         val bulkTxt = if (r.bulkPricePaise > 0L) " • Bulk ${CatalogFilterEngine.formatRs(r.bulkPricePaise)} (≥${CatalogFilterEngine.formatQty(r.bulkMinQtyMilli, unit)})" else ""
-                        Text("Grade ${r.qualityGrade} • $st$bulkTxt", style = MaterialTheme.typography.bodySmall)
+                        Text("Grade ${r.qualityGrade} • $st • ${if (isFresh) "Fresh <48h" else ">48h Old"}$bulkTxt", style = MaterialTheme.typography.bodySmall)
                         if (qM > 0L) Text("₹$targetRsStr → ${CatalogFilterEngine.formatQty(qM, unit)}", color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.SemiBold, style = MaterialTheme.typography.bodySmall)
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                             if (qM > 0L && r.stockStatus > 0) Button({ onAddFromCompare(r.shopId, r.productId, qM, r.pricePaise) }) { Text("+ Cart (${CatalogFilterEngine.formatQty(qM, unit)})") }
@@ -106,13 +108,14 @@ private fun BuyerCompareAndCalcPanel(
 
 @Composable
 private fun BatterySosRelayPanel(
+    buyerCart: List<BuyerCartItemEntity>,
     lastSos: QrCodec.SosRelayChunk?,
     buildSosFrames: (String) -> List<String>,
-    onScanSosQr: () -> Unit,
-    onClearSos: () -> Unit
+    onScanSosQr: () -> Unit, onClearSos: () -> Unit
 ) {
     var kind by remember { mutableStateOf("B1") }
-    val frames = remember(kind) { buildSosFrames(kind) }
+    // Uses collected List<BuyerCartItemEntity> as remember key (never StateFlow).
+    val frames = remember(kind, buyerCart) { buildSosFrames(kind) }
     var idx by remember(frames) { mutableStateOf(0) }
     LaunchedEffect(frames) { if (frames.size > 1) while (true) { delay(1200); idx = (idx + 1) % frames.size } }
     LazyColumn(Modifier.fillMaxSize().padding(12.dp), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -137,9 +140,7 @@ private fun BatterySosRelayPanel(
                 }
             }
         }
-        item {
-            Button(onClick = onScanSosQr, modifier = Modifier.fillMaxWidth()) { Text("Scan Incoming SOS QR (X1 / B1 / X3)") }
-        }
+        item { Button(onClick = onScanSosQr, modifier = Modifier.fillMaxWidth()) { Text("Scan Incoming SOS QR (X1 / B1 / X3)") } }
         lastSos?.let { s ->
             item {
                 Card(Modifier.fillMaxWidth()) {

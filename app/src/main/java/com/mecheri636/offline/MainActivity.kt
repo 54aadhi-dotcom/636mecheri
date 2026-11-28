@@ -49,8 +49,7 @@ class MainActivity : ComponentActivity() {
         applyFlagSecure(m.isLockEnabled() && m.getConfig().flagSecureEnabled)
         setContent {
             MecheriRootApp(
-                vm = viewModel(),
-                bgTick = bgTick.value,
+                vm = viewModel(), bgTick = bgTick.value,
                 volumeKeyStepEnabled = volumeKeyStepEnabled.value,
                 onToggleVolumeKeyStep = { volumeKeyStepEnabled.value = it },
                 volumeStepEvent = volumeStepEvent.value,
@@ -97,6 +96,7 @@ fun MecheriRootApp(
     val customization by vm.customization.collectAsStateWithLifecycle()
     val filter by vm.filter.collectAsStateWithLifecycle()
     val sellerProfile by vm.sellerProfile.collectAsStateWithLifecycle()
+    val buyerProfile by vm.buyerProfile.collectAsStateWithLifecycle()
     val rawSellerItems by vm.rawSellerCatalog.collectAsStateWithLifecycle()
     val activePosSlot by vm.activePosSlot.collectAsStateWithLifecycle()
     val allPosDrafts by vm.allPosDrafts.collectAsStateWithLifecycle()
@@ -107,6 +107,8 @@ fun MecheriRootApp(
     val selectedShopId by vm.selectedBuyerShopId.collectAsStateWithLifecycle()
     val rawBuyerItems by vm.rawBuyerCatalog.collectAsStateWithLifecycle()
     val buyerCart by vm.activeBuyerCart.collectAsStateWithLifecycle()
+    val bundleUndoLabel by vm.bundleUndoLabel.collectAsStateWithLifecycle()
+    val savedTemplates by vm.savedTemplates.collectAsStateWithLifecycle()
     val buyerReceipts by vm.buyerReceipts.collectAsStateWithLifecycle()
     val profitReport by vm.profitReport.collectAsStateWithLifecycle()
     val udhaarList by vm.customerUdhaar.collectAsStateWithLifecycle()
@@ -126,14 +128,14 @@ fun MecheriRootApp(
     LaunchedEffect(bgTick) { if (bgTick > 0) { vaultUnlocked = false; vm.checkAppLock() } }
     var selectedTab by remember(role) { mutableStateOf(0) }
     var activeScanner by remember { mutableStateOf(ActiveScanner.NONE) }
-    LaunchedEffect(activeScanner, posOpen, role, selectedTab) {
-        val keepOn = activeScanner != ActiveScanner.NONE || (role == UserRole.SELLER && (posOpen || selectedTab == 1))
+    LaunchedEffect(activeScanner, posOpen, role, selectedTab, buyerCart.size) {
+        val keepOn = activeScanner != ActiveScanner.NONE ||
+            (role == UserRole.SELLER && (posOpen || selectedTab == 1)) ||
+            (role == UserRole.BUYER && selectedTab == 2 && buyerCart.isNotEmpty())
         onApplyKeepScreenOn(keepOn)
     }
-    var showSort by remember { mutableStateOf(false) }
-    var showFilter by remember { mutableStateOf(false) }
-    var showCustom by remember { mutableStateOf(false) }
-    var editItem by remember { mutableStateOf<CatalogDisplayItem?>(null) }
+    var showSort by remember { mutableStateOf(false) }; var showFilter by remember { mutableStateOf(false) }
+    var showCustom by remember { mutableStateOf(false) }; var editItem by remember { mutableStateOf<CatalogDisplayItem?>(null) }
     val lockCfg = remember(isLocked, lockRefresh, vaultUnlocked, selectedTab) { vm.appLockManager.getConfig() }
     val scopedLock = isLocked && lockCfg.scope == LockScope.PROFIT_AND_VAULT_ONLY && !vaultUnlocked
     val colors = if (customization.themeMode == AppThemeMode.OLED_DARK) darkColorScheme(primary = Color(0xFF81C784), background = Color.Black, surface = Color(0xFF121212)) else lightColorScheme(primary = Color(0xFF1B5E20), secondaryContainer = Color(0xFFE8F5E9))
@@ -155,10 +157,7 @@ fun MecheriRootApp(
                 TopAppBar(
                     title = { Column { Text("636mecheri", fontWeight = FontWeight.Bold, style = MaterialTheme.typography.titleMedium); Text(if (role == UserRole.SELLER) "Seller Mode / விற்பனையாளர்" else "Buyer Mode / வாங்குபவர்", style = MaterialTheme.typography.labelSmall) } },
                     actions = {
-                        if (role == UserRole.SELLER && sellerProfile != null) {
-                            FilledTonalButton({ posOpen = !posOpen }, contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)) { Text(if (posOpen) "Catalog" else "⚡ POS") }
-                            Spacer(Modifier.width(4.dp))
-                        }
+                        if (role == UserRole.SELLER && sellerProfile != null) { FilledTonalButton({ posOpen = !posOpen }, contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)) { Text(if (posOpen) "Catalog" else "⚡ POS") }; Spacer(Modifier.width(4.dp)) }
                         FilledTonalButton(onClick = { posOpen = false; vm.toggleRole() }, contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp)) { Icon(Icons.Default.SwapHoriz, null, Modifier.size(16.dp)); Spacer(Modifier.width(4.dp)); Text(if (role == UserRole.SELLER) "→ Buyer" else "→ Seller") }
                     }
                 )
@@ -196,17 +195,24 @@ fun MecheriRootApp(
                             MultiViewCatalogBrowser(vis, UserRole.SELLER, filter, customization, { id, en -> vm.setSellerItemEnabled(id, en) }, { c, en -> vm.setCategoryEnabledForSeller(c, en) }, { editItem = it }, { _, _, _ -> }, {}, volumeKeyStepEnabled, onToggleVolumeKeyStep, volumeStepEvent)
                         }
                         1 -> SellerLiveBoardQrScreen(prof, remember(rawSellerItems, prof) { vm.buildSellerShopBoardQrFrames() }, { v, p -> vm.updateShopUpi(v, p) }, { activeScanner = ActiveScanner.SELLER_SCAN_CART })
-                        2 -> if (scopedLock) AppLockGateScreen(vm.appLockManager) { vm.unlockApp(); vaultUnlocked = true } else SellerOpsV2Container(recentOrders, remember(rawSellerItems) { rawSellerItems.filter { it.isEnabledInShop } }, vm::voidSellerOrder, vm::updateMorningRate) { SellerOpsHubScreen(profitReport, remember(rawSellerItems) { rawSellerItems.filter { it.isEnabledInShop } }, udhaarList, zReports, auditLogs, { t, a, n -> vm.recordExpense(t, a, n) }, { id, q, l, r -> vm.recordWaste(id, q, l, r) }, { id, q, c, n -> vm.recordStockInward(id, q, c, n) }, { al, ar, d, r, ex -> vm.upsertUdhaarCustomer(al, ar, d, r, ex) }, { o, c, n -> vm.recordCashZReportIst(o, c, n) }, { k, j -> vm.saveDraft(k, j) }, { k, cb -> vm.loadDraft(k, cb) }, { k -> vm.clearDraft(k) }, customization.language != AppLanguage.ENGLISH, volumeKeyStepEnabled, onToggleVolumeKeyStep, volumeStepEvent) }
+                        2 -> if (scopedLock) AppLockGateScreen(vm.appLockManager) { vm.unlockApp(); vaultUnlocked = true } else SellerOpsV2Container(recentOrders, remember(rawSellerItems) { rawSellerItems.filter { it.isEnabledInShop } }, vm::voidSellerOrder, vm::updateMorningRate) {
+                            SellerOpsHubScreen(profitReport, remember(rawSellerItems) { rawSellerItems.filter { it.isEnabledInShop } }, udhaarList, zReports, auditLogs, { t, a, n -> vm.recordExpense(t, a, n) }, { id, q, l, r -> vm.recordWaste(id, q, l, r) }, { id, q, c, n -> vm.recordStockInward(id, q, c, n) }, { al, ar, d, r, ex -> vm.upsertUdhaarCustomer(al, ar, d, r, ex) }, { o, c, n -> vm.recordCashZReportIst(o, c, n) }, { k, j -> vm.saveDraft(k, j) }, { k, cb -> vm.loadDraft(k, cb) }, { k -> vm.clearDraft(k) }, customization.language != AppLanguage.ENGLISH, volumeKeyStepEnabled, onToggleVolumeKeyStep, volumeStepEvent)
+                        }
                     }
                 } else {
+                    val buyerCatMap = remember(rawBuyerItems) { rawBuyerItems.associateBy { it.productId } }
+                    val activeShop = savedShops.firstOrNull { it.shopId == selectedShopId }
+                    val isHomeList = selectedShopId.isNullOrBlank() || selectedShopId == HOME_MARKET_SHOP_ID
                     when (selectedTab) {
-                        0 -> BuyerShopsHubScreen(savedShops, selectedShopId, rawSellerItems, lastSos, { id -> vm.selectBuyerShop(id); selectedTab = 1 }, { activeScanner = ActiveScanner.BUYER_SCAN_SHOP }, { id -> vm.observeProductComparison(id) }, { rs, pr -> vm.computeQtyForRupees(rs, pr) }, { sid, id, q, p -> vm.selectBuyerShop(sid); vm.setBuyerCartQuantity(id, q, p); selectedTab = 2 }, { k -> vm.buildSosQrFrames(k) }, { activeScanner = ActiveScanner.SCAN_SOS }, { vm.clearLastSos() })
-                        1 -> Column(Modifier.fillMaxSize()) {
-                            CatalogToolbar(UserRole.BUYER, filter, vm::updateFilter, { showSort = true }, { showFilter = true }, { showCustom = true })
-                            val vis = remember(rawBuyerItems, filter) { CatalogFilterEngine.apply(rawBuyerItems, UserRole.BUYER, filter) }
-                            MultiViewCatalogBrowser(vis, UserRole.BUYER, filter, customization, { _, _ -> }, { _, _ -> }, {}, { id, m, p -> vm.setBuyerCartQuantity(id, m, p) }, { id -> vm.toggleBuyerHiddenProduct(id, true) }, volumeKeyStepEnabled, onToggleVolumeKeyStep, volumeStepEvent)
+                        0 -> BuyerShopsHubScreen(savedShops, selectedShopId, rawSellerItems, buyerCart, lastSos, { id -> vm.selectBuyerShop(id); selectedTab = 1 }, { vm.selectBuyerShop(HOME_MARKET_SHOP_ID); selectedTab = 1 }, { activeScanner = ActiveScanner.BUYER_SCAN_SHOP }, { id -> vm.observeProductComparison(id) }, { rs, pr -> vm.computeQtyForRupees(rs, pr) }, { sid, id, q, p -> vm.selectBuyerShop(sid); vm.setBuyerCartQuantity(id, q, p); selectedTab = 2 }, { k -> vm.buildSosQrFrames(k) }, { activeScanner = ActiveScanner.SCAN_SOS }, { vm.clearLastSos() })
+                        1 -> BuyerBrowseHeaderAndOverlays(activeShop, buyerCart, buyerCatMap, buyerProfile, bundleUndoLabel, vm::applyRecipeBundle, vm::undoLastRecipeBundle, { selectedTab = 2 }, { activeScanner = ActiveScanner.BUYER_SCAN_SHOP }) {
+                            Column(Modifier.fillMaxSize()) {
+                                CatalogToolbar(UserRole.BUYER, filter, vm::updateFilter, { showSort = true }, { showFilter = true }, { showCustom = true })
+                                val vis = remember(rawBuyerItems, filter) { CatalogFilterEngine.apply(rawBuyerItems, UserRole.BUYER, filter) }
+                                MultiViewCatalogBrowser(vis, UserRole.BUYER, filter, customization, { _, _ -> }, { _, _ -> }, {}, { id, m, p -> vm.setBuyerCartQuantity(id, m, p) }, { id -> vm.toggleBuyerHiddenProduct(id, true) }, volumeKeyStepEnabled, onToggleVolumeKeyStep, volumeStepEvent)
+                            }
                         }
-                        2 -> BuyerCartAndQrScreen(savedShops.firstOrNull { it.shopId == selectedShopId }?.shopName ?: "Selected Shop", buyerCart, remember(rawBuyerItems) { rawBuyerItems.associateBy { it.productId } }, remember(buyerCart, selectedShopId) { vm.buildBuyerCartQr() }, buyerReceipts, { vm.clearActiveBuyerCart() }, { activeScanner = ActiveScanner.BUYER_SCAN_RECEIPT })
+                        2 -> BuyerCartAndQrScreen(activeShop?.shopName ?: "Home List", isHomeList, buyerCart, buyerCatMap, remember(buyerCart, selectedShopId, rawBuyerItems, buyerProfile) { vm.buildBuyerCartQr() }, buyerReceipts, buyerProfile, savedTemplates, { vm.clearActiveBuyerCart() }, { activeScanner = ActiveScanner.BUYER_SCAN_RECEIPT }, { activeScanner = ActiveScanner.BUYER_SCAN_SHOP }, vm::saveCurrentCartAsTemplate, vm::applySavedTemplate, vm::deleteSavedTemplate, vm::updateBuyerProfile)
                     }
                 }
             }
